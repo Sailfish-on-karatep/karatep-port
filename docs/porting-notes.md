@@ -54,6 +54,49 @@ instructions use raw `mmcblk0p*` nodes.
 
 ---
 
+## Verify the boot image before flashing
+
+`make hybris-hal` ending in
+
+```
+Install: out/target/product/karatep/hybris-boot.img
+```
+
+is **not** proof of a usable image. hybris-boot builds its initramfs by copying
+`hybris/hybris-boot/initramfs/` into a staging directory; if that source directory is empty,
+it packs a 20-byte empty gzip and produces a boot image with no `init` at all. The build
+reports success.
+
+Flashing such an image does not brick the device, but it does not boot either: the kernel
+comes up with no initramfs, panics, and the device drops off USB and re-enumerates as
+`05c6:900e Qualcomm QHSUSB__BULK` before returning to fastboot. There is no RNDIS, so the
+recovery shell never appears and any network-based installer just waits forever.
+
+Cheap pre-flight check — a sound image is roughly **1.5 MB larger** than the bare kernel:
+
+```sh
+cd $ANDROID_ROOT/out/target/product/karatep
+ls -l kernel hybris-boot.img
+# good: kernel 10,691,936   hybris-boot.img 12,283,904   (~1.59 MB of initramfs)
+# bad:  kernel 10,691,936   hybris-boot.img 10,696,704   (4,768 bytes — no initramfs)
+```
+
+Or directly:
+
+```sh
+ls -l out/target/product/karatep/obj/ROOT/hybris-boot_intermediates/boot-initramfs.gz
+# 20 bytes == empty
+```
+
+**How the source directory goes empty:** `repo sync` resets `hybris/hybris-boot` unless the
+local manifest pins it to a fork — the HADK warns about exactly this in *Configure Mountpoint
+Information*. A partial or interrupted `repo sync --force-sync` can leave the project without
+its `initramfs/` contents. `manifests/local_manifests.xml` now pins
+`Sailfish-on-karatep/hybris-boot`, which is the documented protection; HADK's *Common Pitfalls*
+also says a `--force-sync` should always be followed by a full `repo sync`.
+
+---
+
 ## Known-good workarounds (not yet root-caused)
 
 * **`bluebinder` and WLAN conflict at boot.** With `bluebinder` unmasked, `wlan0` never
