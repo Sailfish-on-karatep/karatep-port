@@ -73,7 +73,9 @@ fi
 
 say "Waiting for the device at $DEVICE_IP"
 for _ in $(seq 1 60); do
-    ping -c1 -W1 "$DEVICE_IP" >/dev/null 2>&1 && break
+    # NB: plain `ping ... && break` would abort the script under `set -e` on the
+    # first failed probe, which is exactly the case we are waiting through.
+    if ping -c1 -W1 "$DEVICE_IP" >/dev/null 2>&1; then break; fi
     sleep 2
 done
 ping -c1 -W1 "$DEVICE_IP" >/dev/null 2>&1 \
@@ -88,8 +90,9 @@ say "Host address on the USB link: $HOST_IP"
 
 # ------------------------------------------------------------------ http server
 
-command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ":$HTTP_PORT " \
-    && die "port $HTTP_PORT is already in use; pass --port to pick another"
+if command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ":$HTTP_PORT "; then
+    die "port $HTTP_PORT is already in use; pass --port to pick another"
+fi
 
 say "Serving $RELEASE_DIR on $HOST_IP:$HTTP_PORT"
 python3 -m http.server "$HTTP_PORT" --bind "$HOST_IP" --directory "$RELEASE_DIR" \
