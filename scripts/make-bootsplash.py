@@ -75,14 +75,10 @@ def build(width, height, stride, preview=None):
     draw_sail(d, width // 2, int(height * 0.42), r)
 
     title = load_font(max(24, width // 13))
-    sub = load_font(max(16, width // 30))
-    for text, font, y, fill in (
-        ("Sailfish OS", title, int(height * 0.63), (255, 255, 255)),
-        ("karatep", sub, int(height * 0.70), (170, 170, 170)),
-    ):
-        box = d.textbbox((0, 0), text, font=font)
-        d.text(((width - (box[2] - box[0])) // 2 - box[0], y), text,
-               font=font, fill=fill)
+    text = "Sailfish OS"
+    box = d.textbbox((0, 0), text, font=title)
+    d.text(((width - (box[2] - box[0])) // 2 - box[0], int(height * 0.63)),
+           text, font=title, fill=(255, 255, 255))
 
     if preview:
         img.save(preview)
@@ -109,16 +105,28 @@ def main():
     p.add_argument("--width", type=int, default=1080)
     p.add_argument("--height", type=int, default=1920)
     p.add_argument("--stride", type=int, default=4352)
+    p.add_argument("--buffers", type=int, default=2,
+                   help="how many screen-sized buffers the framebuffer holds "
+                        "(virtual_size height / visible height). The image is "
+                        "repeated into each one.")
     p.add_argument("--preview")
     a = p.parse_args()
 
-    raw = build(a.width, a.height, a.stride, a.preview)
-    expected = a.stride * a.height
+    frame = build(a.width, a.height, a.stride, a.preview)
+
+    # virtual_size on karatep is 1080,3840 -- two 1920-line buffers. hybris-boot
+    # writes the splash with a plain `zcat > /dev/fb0`, which always lands at
+    # offset 0, so if the panel is currently showing the SECOND buffer the image
+    # goes to the off-screen one and the display just stays black. Repeat the
+    # frame into every buffer so it is visible whichever one is active.
+    raw = frame * a.buffers
+
+    expected = a.stride * a.height * a.buffers
     assert len(raw) == expected, (len(raw), expected)
     with gzip.open(a.output, "wb", compresslevel=9) as f:
         f.write(raw)
-    print("%s: %d raw bytes (%dx%d, stride %d)"
-          % (a.output, len(raw), a.width, a.height, a.stride))
+    print("%s: %d raw bytes (%dx%d, stride %d, %d buffer(s))"
+          % (a.output, len(raw), a.width, a.height, a.stride, a.buffers))
 
 
 if __name__ == "__main__":
