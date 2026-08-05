@@ -3,7 +3,7 @@
 Device: **lenovo/karatep** — Lenovo Vibe K6 Note / Plus, **MSM8937 / Snapdragon 430**, Adreno 505.
 Base: LineageOS 18.1 (Android 11) / `hybris-18.1`, aarch64, Sailfish OS 5.1.0.11.
 
-Status: **fixed** by `hybris-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`.
+Status: **fixed** by `karatep-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`.
 Verified on hardware.
 
 ---
@@ -153,7 +153,7 @@ and the composer immediately succeeds.
 
 ## The fix
 
-`hybris-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`
+`karatep-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`
 adds two commands to the end of `on early-init` in `system/core/rootdir/init.rc`:
 
 ```
@@ -184,15 +184,22 @@ This fixes the whole class of early vendor services, not just `vndservicemanager
 ## How the fix is delivered
 
 Nothing is edited directly in the Android source tree. The patch lives in
-`Sailfish-on-karatep/hybris-patches`, which is now a strict superset of
-`mer-hybris/hybris-patches` and is pinned over it in `.repo/local_manifests/karatep.xml`, so a
-clean build on any machine is:
+`Sailfish-on-karatep/karatep-patches`, which carries **only** the karatep patches;
+`mer-hybris/hybris-patches` is synced normally and is not forked. A clean build on any machine
+is:
 
 ```sh
 repo sync
 cd $ANDROID_ROOT
-hybris-patches/apply-patches.sh --mb
+hybris-patches/apply-patches.sh --mb       # upstream series
+karatep-patches/apply-patches.sh --mb      # karatep patches, on top
 ```
+
+The second pass exists because these patches are written against the tree *after* upstream's
+series. That is verified rather than assumed: applied to a pristine LineageOS `hybris-18.1`
+tree, `system/core/0040` and `bionic/0009` both fail. Changes to repos that upstream's series
+does *not* touch are carried as forks repinned in `local_manifests.xml` instead — that is how
+the kernel, both device trees, the vendor blobs and `hybris-boot` are handled.
 
 Three defects had to be fixed before that actually worked:
 

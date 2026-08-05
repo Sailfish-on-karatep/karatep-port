@@ -23,31 +23,35 @@
 		name="Sailfish-on-karatep/droid-hal-version-karatep" revision="hybris-18.1" />
 
 	<!--
-	  hybris-patches: use the karatep fork instead of mer-hybris/hybris-patches.
+	  hybris-boot: karatep fork, following the HADK's "Contribute your mods back"
+	  pattern (fork the repo, commit, replace the project line here).
 
-	  The fork is a strict superset - it carries the full upstream hybris-18.1
-	  patch series plus the karatep-specific patches, numbered so that the
-	  lexicographic order apply-patches.sh relies on (it runs
-	  `git am <dir>/*.patch`) matches the dependency order:
-
-	      bionic/0001..0008              upstream
-	      bionic/0009                    karatep: TLS_SLOT_ART_THREAD_SELF
-	      system/core/0001..0039         upstream
-	      system/core/0040               linkerconfig switch for no updatable apex
-	      system/core/0041               always regenerate linker config (needs 0040)
-	      system/core/0042               finalise linker config before `on init` (needs 0041)
-	      hybris/hybris-boot/0001        karatep mountpoint fixups
-
-	  Without this override a fresh `repo sync` pulls upstream hybris-patches,
-	  apply-patches.sh silently produces a tree with none of the karatep fixes,
-	  and the device boots without a working /dev/vndbinder (see
-	  hybris_lenovo_karatep_devjournal/vndservicemanager_libbinder_rca.md).
-
-	  remove-project is required first: repo refuses two projects on the same path.
+	  It carries one commit on top of upstream master: the karatep entry in
+	  fixup-mountpoints, which maps /dev/block/bootdevice/by-name/* to the raw
+	  mmcblk nodes. Without it hybris-boot aborts with "does not have mountpoint
+	  fixup data". No mer-hybris hybris-patch touches hybris-boot, so a fork is
+	  the right mechanism here and no patch is involved.
 	-->
-	<remove-project name="mer-hybris/hybris-patches" />
-	<project path="hybris-patches"
-		name="Sailfish-on-karatep/hybris-patches" revision="hybris-18.1" />
+	<remove-project name="mer-hybris/hybris-boot" />
+	<project path="hybris/hybris-boot"
+		name="Sailfish-on-karatep/hybris-boot" revision="hybris-18.1" />
+
+	<!--
+	  karatep-patches: the four Android-source patches that cannot be carried as
+	  a fork, because they are written against the tree *after* mer-hybris'
+	  patch series has been applied. Verified: against a pristine LineageOS
+	  hybris-18.1 tree, system/core/0040 and bionic/0009 both fail to apply.
+
+	  mer-hybris/hybris-patches is deliberately NOT overridden - it is synced
+	  normally from the default manifest. Apply order (both invoked with the
+	  git-am flag, spelled with two leading dashes which cannot appear inside an
+	  XML comment):
+
+	      1. hybris-patches/apply-patches.sh      upstream, first
+	      2. karatep-patches/apply-patches.sh     ours, on top
+	-->
+	<project path="karatep-patches"
+		name="Sailfish-on-karatep/karatep-patches" revision="hybris-18.1" />
 
 	<!--
 	  Drop the Chromium WebView patches project.

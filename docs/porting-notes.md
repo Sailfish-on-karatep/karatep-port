@@ -45,7 +45,7 @@ instructions use raw `mmcblk0p*` nodes.
   mistake is invisible until a Kconfig change drops a binder node.
 * **Flattened-APEX linker spam** (`Expecting header 0x53595354 but found 0x564e4452`) — see
   [rca/vndservicemanager-libbinder.md](rca/vndservicemanager-libbinder.md). Fixed properly by
-  the `system/core/0040..0042` patches; the older advice to "apply the linkerconfig patch" only
+  the `karatep-patches` `system/core/0040..0042`; the older advice to "apply the linkerconfig patch" only
   addressed half of it.
 * **Chromium WebView is not synced.** LineageOS' manifest links `patches/Android.mk`, which no
   longer exists upstream, leaving a dangling symlink that kills the build with
