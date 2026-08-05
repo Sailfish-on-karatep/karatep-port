@@ -71,6 +71,14 @@ Could this be related to wlan mac being incorrect?
 Pixel ratio is 1.6
 
 Notes:
+- **[SOLVED] No UI until `killall vndservicemanager`** — full root-cause analysis in
+  [vndservicemanager_libbinder_rca.md](vndservicemanager_libbinder_rca.md). Short version:
+  hybris compiles out Android's mount namespaces, so `/linkerconfig` only switches from the
+  bootstrap config to the APEX-aware one at `on post-fs-data`, which is *after* `on init`
+  has started `vndservicemanager`. It therefore links `/system/lib64/libbinder.so` (`SYST`)
+  while every vendor client uses the VNDK copy (`VNDR`), so all `/dev/vndbinder` lookups are
+  rejected and `hwcomposer-2-1` crash-loops. Fixed by
+  `hybris-patches/system/core/0052-hybris-finalise-linker-config-before-on-init.patch`.
 - Updated/recent hybris patches are at hadk-hot. Refer them along with/instead of hadk-faq. https://sailfishos.wiki/books/hadk/page/hadk-hot#bkmrk-common
 - <mal> only relevant part from 16 in 18.1 base is cloning libhybris
 - Add LOS devicesettings: https://github.com/tanvirr007/CustomROM_build_guide_aosp
