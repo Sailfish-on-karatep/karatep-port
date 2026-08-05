@@ -4,6 +4,21 @@
 >
 > Flashing low-level partitions can permanently brick your device if performed incorrectly. This guide assumes you are using the official Sailfish OS build generated for **karatep**.
 
+> **Automated alternative**
+>
+> [`scripts/flash.sh`](../scripts/flash.sh) performs every step below: it live-boots the
+> recovery, finds the built image, works out the host address on the USB link with
+> `ip route get` rather than assuming one, serves the rootfs, drives the recovery shell, and
+> refuses to write the boot partition unless the extracted rootfs verifies.
+>
+> ```sh
+> scripts/flash.sh                       # discovers the newest build under $ANDROID_ROOT
+> scripts/flash.sh --release-dir DIR     # or point it at a specific one
+> ```
+>
+> Read this document first anyway — it explains what each step does and how to recover when
+> one of them fails.
+
 ## Prerequisites
 
 ### Android Base
