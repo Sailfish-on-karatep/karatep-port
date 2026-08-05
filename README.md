@@ -132,15 +132,22 @@ rpm/dhd/helpers/build_packages.sh --mic
 ```
 
 > **Check the boot image before flashing.** `Install: … hybris-boot.img` at the end of the
-> Android build is not proof of success: if `hybris/hybris-boot/initramfs/` is empty at build
-> time, hybris-boot happily packs a 20-byte empty ramdisk and the resulting image crashes the
-> device into Qualcomm bulk mode instead of booting. A good `hybris-boot.img` is roughly 1.5 MB
-> larger than `out/target/product/karatep/kernel`; if the difference is a few kilobytes, the
-> initramfs is missing.
+> Android build is not proof of success. hybris-boot builds its ramdisk with
+> `find … | cpio -H newc -o | gzip -9`, and **the Jolla Ubuntu chroot does not ship `cpio`** —
+> the pipeline then emits nothing, `gzip` still exits 0, and make happily writes an image with
+> no `init`. Flashing it drops the device into Qualcomm bulk mode (`05c6:900e`) with no USB
+> networking, so the installer waits forever for a recovery shell that never appears.
 >
-> This is also why `hybris-boot` must be pinned to the fork — the HADK warns that a `repo sync`
-> otherwise resets `fixup-mountpoints`, and a partially-synced `hybris-boot` is what produced
-> the empty initramfs here.
+> ```sh
+> ls -l out/target/product/karatep/{kernel,hybris-boot.img}
+> # good: hybris-boot.img is ~1.5 MB larger than kernel
+> # bad:  the difference is a few kilobytes -> no initramfs
+> ```
+>
+> Fix once per chroot with `sudo apt-get install -y cpio`, then delete
+> `out/target/product/karatep/obj/ROOT/hybris-{boot,recovery}_intermediates` — a 20-byte
+> `boot-initramfs.gz` is otherwise considered up to date. Details in
+> [`docs/porting-notes.md`](docs/porting-notes.md#cause-cpio-is-missing-from-the-habuild-chroot).
 
 Everything device-specific is either a fork repinned in `local_manifests.xml` (the HADK's
 "Contribute your mods back" pattern) or one of the four patches in `karatep-patches`. There is
