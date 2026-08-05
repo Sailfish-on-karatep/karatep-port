@@ -21,4 +21,31 @@
 		name="Sailfish-on-karatep/droid-config-karatep" revision="hybris-18.1" />
 	<project path="hybris/droid-hal-version-karatep"
 		name="Sailfish-on-karatep/droid-hal-version-karatep" revision="hybris-18.1" />
+
+	<!--
+	  hybris-patches: use the karatep fork instead of mer-hybris/hybris-patches.
+
+	  The fork is a strict superset - it carries the full upstream hybris-18.1
+	  patch series plus the karatep-specific patches, numbered so that the
+	  lexicographic order apply-patches.sh relies on (it runs
+	  `git am <dir>/*.patch`) matches the dependency order:
+
+	      bionic/0001..0008              upstream
+	      bionic/0009                    karatep: TLS_SLOT_ART_THREAD_SELF
+	      system/core/0001..0039         upstream
+	      system/core/0040               linkerconfig switch for no updatable apex
+	      system/core/0041               always regenerate linker config (needs 0040)
+	      system/core/0042               finalise linker config before `on init` (needs 0041)
+	      hybris/hybris-boot/0001        karatep mountpoint fixups
+
+	  Without this override a fresh `repo sync` pulls upstream hybris-patches,
+	  apply-patches.sh silently produces a tree with none of the karatep fixes,
+	  and the device boots without a working /dev/vndbinder (see
+	  hybris_lenovo_karatep_devjournal/vndservicemanager_libbinder_rca.md).
+
+	  remove-project is required first: repo refuses two projects on the same path.
+	-->
+	<remove-project name="mer-hybris/hybris-patches" />
+	<project path="hybris-patches"
+		name="Sailfish-on-karatep/hybris-patches" revision="hybris-18.1" />
 </manifest>

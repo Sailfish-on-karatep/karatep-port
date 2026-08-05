@@ -78,7 +78,7 @@ Notes:
   has started `vndservicemanager`. It therefore links `/system/lib64/libbinder.so` (`SYST`)
   while every vendor client uses the VNDK copy (`VNDR`), so all `/dev/vndbinder` lookups are
   rejected and `hwcomposer-2-1` crash-loops. Fixed by
-  `hybris-patches/system/core/0052-hybris-finalise-linker-config-before-on-init.patch`.
+  `hybris-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`.
 - Updated/recent hybris patches are at hadk-hot. Refer them along with/instead of hadk-faq. https://sailfishos.wiki/books/hadk/page/hadk-hot#bkmrk-common
 - <mal> only relevant part from 16 in 18.1 base is cloning libhybris
 - Add LOS devicesettings: https://github.com/tanvirr007/CustomROM_build_guide_aosp
