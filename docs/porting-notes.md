@@ -85,15 +85,49 @@ Or directly:
 
 ```sh
 ls -l out/target/product/karatep/obj/ROOT/hybris-boot_intermediates/boot-initramfs.gz
-# 20 bytes == empty
+# 20 bytes == an empty gzip stream == no initramfs
 ```
 
-**How the source directory goes empty:** `repo sync` resets `hybris/hybris-boot` unless the
-local manifest pins it to a fork — the HADK warns about exactly this in *Configure Mountpoint
-Information*. A partial or interrupted `repo sync --force-sync` can leave the project without
-its `initramfs/` contents. `manifests/local_manifests.xml` now pins
-`Sailfish-on-karatep/hybris-boot`, which is the documented protection; HADK's *Common Pitfalls*
-also says a `--force-sync` should always be followed by a full `repo sync`.
+### Cause: `cpio` is missing from the HABUILD chroot
+
+`hybris/hybris-boot/Android.mk` builds the ramdisk with
+
+```make
+@(cd $(BOOT_INTERMEDIATE)/initramfs && find . -printf '%P\n' | cpio -H newc -o ) | gzip -9 > $@
+```
+
+The Jolla Ubuntu chroot (`ubuntu-focal-20210531-android-rootfs.tar.bz2`) **does not ship
+`cpio`** — no binary, no dpkg record. `cpio` is also absent from Soong's PATH sandbox
+(`prebuilts/build-tools/path/linux-x86/`, which carries ~60 host tools). mer-hybris'
+`build/soong/0001-hybris-Add-cpio-to-allowed-commands.patch` marks it `Allowed`, but that only
+permits pass-through to the *host* binary — it does not provide one.
+
+With `cpio` absent the pipeline emits nothing, and because the recipe's exit status is `gzip`'s
+(which succeeds on empty input), **make reports success**. You get
+`Install: … hybris-boot.img` and an image with no `init`.
+
+Fix, once per chroot:
+
+```sh
+/opencloud/bin/habuild -u $USER /bin/bash -c 'sudo apt-get update && sudo apt-get install -y cpio'
+```
+
+Then delete the stale intermediates so the ramdisk is regenerated — a 20-byte
+`boot-initramfs.gz` is otherwise considered up to date:
+
+```sh
+rm -rf $ANDROID_ROOT/out/target/product/karatep/obj/ROOT/hybris-{boot,recovery}_intermediates
+```
+
+> An earlier revision of this note blamed an empty `hybris/hybris-boot/initramfs/` source
+> directory after a partial `repo sync`. That was wrong: a later build had the staging
+> directory fully populated and still produced a 20-byte ramdisk. The missing `cpio` is the
+> actual cause.
+
+Separately — and still true — `repo sync` resets `hybris/hybris-boot` unless the local manifest
+pins it to a fork; the HADK warns about this in *Configure Mountpoint Information*, and
+`manifests/local_manifests.xml` now pins `Sailfish-on-karatep/hybris-boot`. HADK's *Common
+Pitfalls* also says a `--force-sync` should be followed by a full `repo sync`.
 
 ---
 
