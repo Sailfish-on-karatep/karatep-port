@@ -75,6 +75,7 @@ the IMS daemon crash-loop and the `bluebinder` / WLAN conflict.
 | [`docs/flashing.md`](docs/flashing.md) | **Start here to install.** Step-by-step flashing guide, plus troubleshooting for the errors this device actually produces. |
 | [`docs/porting-notes.md`](docs/porting-notes.md) | Accumulated device knowledge: partition map, fixes already in the tree, known workarounds, how to debug the boot. |
 | [`docs/rca/`](docs/rca/) | Root-cause write-ups for bugs that were properly diagnosed. |
+| [`docs/hadk-compliance.md`](docs/hadk-compliance.md) | Chapter-by-chapter audit of this port against the HADK: what complies, what was fixed, and which deviations are deliberate. |
 | [`docs/useful-commands.md`](docs/useful-commands.md) | Short command reference (rebooting to fastboot/recovery from Sailfish, etc.). |
 | [`manifests/local_manifests.xml`](manifests/local_manifests.xml) | The `repo` local manifest. Copy to `$ANDROID_ROOT/.repo/local_manifests/`. |
 | [`scripts/flash.sh`](scripts/flash.sh) | Semi-automated flasher; discovers the USB network address itself. |
