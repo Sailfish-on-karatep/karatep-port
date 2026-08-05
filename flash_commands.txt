@@ -1,12 +1,12 @@
 # 1. Wipe Data in TWRP
 # Boot to TWRP and Factory Reset. Do NOT wipe Vendor or System.
 
-# 2. Flash hybris-boot.img and boot it
-fastboot flash boot hybris-boot.img
-fastboot reboot
+# 2. Live-boot hybris-recovery (Do NOT flash, to preserve TWRP)
+# Reboot phone to bootloader/fastboot mode first
+fastboot boot hybris-recovery.img
 
 # 3. Start Python Web Server on Host PC
-# (Run this in the directory containing the sailfishos...tar.bz2 file)
+# (Run this in the directory containing both sailfishos...tar.bz2 AND hybris-boot.img)
 python3 -m http.server 8000
 
 # 4. Connect to Sailfish Pre-Switch_Root Shell
@@ -20,5 +20,9 @@ echo "rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos
 
 # (Change 192.168.2.14 to your host PC's actual USB IP if different)
 echo "wget -O - http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
+
+# Flash the kernel to boot partition
+echo "wget -O /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
+echo "dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot" > /init-ctl/stdin
 
 echo "reboot" > /init-ctl/stdin

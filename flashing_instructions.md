@@ -13,23 +13,22 @@ Sailfish OS needs a clean `/data` partition to unpack its rootfs.
 2. Perform a standard **Factory Reset** (Wipes Data, Cache, and Dalvik).
    * *Note: Do NOT wipe the `System` or `Vendor` partitions. Sailfish OS needs the Android vendor partition intact!*
 
-## 2. Boot into Sailfish "Boat Loader"
-Since TWRP is often 32-bit and cannot process the 64-bit Sailfish installer scripts (Error 11) or lacks proper tar capabilities (Error 1), we will use the native Sailfish OS recovery environment.
+## 2. Boot into Sailfish Recovery (Live Boot)
+Since TWRP is often 32-bit and cannot process the 64-bit Sailfish installer scripts (Error 11) or lacks proper tar capabilities (Error 1), we will use the native Sailfish OS `hybris-recovery.img`. To protect your existing TWRP installation, we will live-boot this image into RAM without flashing it.
 
-1. Extract `hybris-boot.img` and `sailfishos-karatep-release-5.1.0.11.tar.bz2` from the generated flashable ZIP on your PC.
+1. Extract `hybris-recovery.img`, `hybris-boot.img` and `sailfishos-karatep-release-5.1.0.11.tar.bz2` from the generated flashable ZIP on your PC.
 2. Put the phone into Fastboot/Bootloader mode.
-3. Flash the Sailfish OS boot image:
+3. Live-boot the Sailfish OS recovery image into RAM:
    ```bash
-   fastboot flash boot hybris-boot.img
-   fastboot reboot
+   fastboot boot hybris-recovery.img
    ```
-4. The device will boot. Since it cannot find the root filesystem yet, it will automatically drop into the emergency network shell.
+4. The device will boot. Since it has no touch UI, it will appear stuck on the Lenovo splash screen, but it will automatically expose an emergency network shell over USB.
 
 ## 3. Flash via Network Injection (Port 23)
 The Sailfish emergency shell exposes a USB network interface. We will serve the root filesystem from your host PC and command the device to download and extract it.
 
 1. **Start the Web Server:**
-   On your host PC, navigate to the folder containing the extracted `.tar.bz2` and start a Python HTTP server:
+   On your host PC, navigate to the folder containing the extracted files and start a Python HTTP server:
    ```bash
    python3 -m http.server 8000
    ```
@@ -61,6 +60,12 @@ The Sailfish emergency shell exposes a USB network interface. We will serve the 
    echo "wget -O - http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
    ```
    *(Wait for the file extraction to complete in the `init.log` output).*
+
+   *Flash the Sailfish OS kernel permanently to the boot partition:*
+   ```bash
+   echo "wget -O /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
+   echo "dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot" > /init-ctl/stdin
+   ```
 
 4. **Reboot:**
    ```bash
