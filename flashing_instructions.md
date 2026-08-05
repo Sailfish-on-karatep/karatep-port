@@ -42,41 +42,35 @@ The Sailfish emergency shell exposes a USB network interface. We will serve the 
    *(Note your host PC's IP address on the new USB interface, usually `192.168.2.14` or similar).*
 
 2. **Connect via Telnet:**
-   On your host PC, connect to the device's pre-switch_root debug shell on port **23**:
+   On your host PC, connect to the device's recovery shell on port **2323**:
    ```bash
-   telnet 192.168.2.15 23
+   telnet 192.168.2.15 2323
    ```
-   *You should see "Welcome to the Mer/SailfishOS Boat loader debug init system."*
+   *You should drop straight into an interactive command prompt.*
 
-3. **Inject Flashing Commands:**
-   In this environment, you inject commands directly into PID 1 using `echo "..." > /init-ctl/stdin`.
-   
-   *Start the log watcher to see command output:*
-   ```bash
-   tail -f /init.log &
-   ```
+3. **Run Flashing Commands:**
+   Execute these commands directly in the telnet terminal:
    
    *Mount the userdata partition and prepare the directory:*
    ```bash
-   echo "mount -t ext4 /dev/block/bootdevice/by-name/userdata /data" > /init-ctl/stdin
-   echo "rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos" > /init-ctl/stdin
+   mount -t ext4 /dev/block/bootdevice/by-name/userdata /data
+   rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos
    ```
    
    *Stream and extract the OS directly (replace IP with your host IP):*
    ```bash
-   echo "curl -f -L http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
+   curl -f -L http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos
    ```
-   *(Wait for the file extraction to complete in the `init.log` output).*
-
+   
    *Flash the Sailfish OS kernel permanently to the boot partition:*
    ```bash
-   echo "curl -f -L -o /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
-   echo "dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot" > /init-ctl/stdin
+   curl -f -L -o /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img
+   dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot
    ```
 
 4. **Reboot:**
    ```bash
-   echo "reboot" > /init-ctl/stdin
+   reboot
    ```
 
 ## 4. Boot & Initial Verification

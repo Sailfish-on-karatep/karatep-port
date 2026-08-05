@@ -10,20 +10,18 @@ fastboot boot /opencloud/hadk/out/target/product/karatep/hybris-recovery.img
 cd /opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep
 python3 -m http.server 8000
 
-# 4. Connect to Sailfish Pre-Switch_Root Shell
-telnet 192.168.2.15 23
+# 4. Connect to Sailfish Recovery Shell
+telnet 192.168.2.15 2323
 
-# 5. Inject Commands (Copy/Paste these one by one)
-tail -f /init.log &
-
-echo "mount -t ext4 /dev/block/bootdevice/by-name/userdata /data" > /init-ctl/stdin
-echo "rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos" > /init-ctl/stdin
+# 5. Run Commands directly in the terminal (Copy/Paste)
+mount -t ext4 /dev/block/bootdevice/by-name/userdata /data
+rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos
 
 # (Change 192.168.2.14 to your host PC's actual USB IP if different)
-echo "curl -f -L http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
+curl -f -L http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos
 
 # Flash the kernel to boot partition
-echo "curl -f -L -o /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
-echo "dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot" > /init-ctl/stdin
+curl -f -L -o /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img
+dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot
 
-echo "reboot" > /init-ctl/stdin
+reboot
