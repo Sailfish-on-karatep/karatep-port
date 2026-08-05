@@ -83,7 +83,7 @@ Notes:
 - Stop system init to prevent bootloop: Create file init_enter_debug2 to sailfish os root i.e. in /data/.stowaways/sailfishos/init_enter_debug2 (Thanks @mal)
 - Files on dcd/sparse/ gets copied onto the device.
 - Symlink /apex .so libraries into /odm on device or /sparse/odm on dev machine.
-- Spam "Expecting header 0x53595354 but found 0x564e4452. Mixing copies of libbinder?". Kill that process to restart vndservicemanager. Need to find a permanent fix. Dirty fix: "killall vndservicemanager" (at boot)
+- Spam "Expecting header 0x53595354 but found 0x564e4452. Mixing copies of libbinder?". Fixed by applying the patch for generating dynamic linker config for flattened APEX namespaces in `system/core/init` and `mount_namespace.cpp`.
 - Missing battery info? Add hw-settings.ini to specify sensor information. Refer hadk-faq
 - Sailjail fixes: Enable CONFIG_UTS_NS, CONFIG_IPC_NS, CONFIG_USER_NS, CONFIG_PID_NS, CONFIG_NET_NS, CONFIG_NF_CONNTRACK_NETBIOS_NS in karatep_defconfig
 
