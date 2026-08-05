@@ -71,9 +71,22 @@ else
     RELEASE_DIR=$(dirname "$ROOTFS")
 fi
 
+# hybris-boot.img is only present in the release directory when mic extracted the
+# kickstart's %attachment section; build_packages.sh -i does not always leave it there.
+# The authoritative copy is the one the Android build produced.
 BOOT_IMG="$RELEASE_DIR/hybris-boot.img"
-[ -f "$BOOT_IMG" ] || die "missing $BOOT_IMG"
+if [ ! -f "$BOOT_IMG" ]; then
+    BOOT_IMG="$ANDROID_ROOT/out/target/product/karatep/hybris-boot.img"
+fi
+[ -f "$BOOT_IMG" ] \
+    || die "no hybris-boot.img in $RELEASE_DIR or $ANDROID_ROOT/out/target/product/karatep"
 [ -f "$RECOVERY_IMG" ] || die "missing $RECOVERY_IMG"
+
+# The recovery downloads it over HTTP from $RELEASE_DIR, so make sure it is there.
+if [ ! -f "$RELEASE_DIR/hybris-boot.img" ]; then
+    cp "$BOOT_IMG" "$RELEASE_DIR/hybris-boot.img" 2>/dev/null \
+        || die "cannot copy hybris-boot.img into $RELEASE_DIR (root-owned? run: sudo cp '$BOOT_IMG' '$RELEASE_DIR/')"
+fi
 
 say "Files"
 printf '    rootfs   : %s (%s)\n' "$(basename "$ROOTFS")" "$(du -h "$ROOTFS" | cut -f1)"
