@@ -22,8 +22,9 @@ TELNET_PORT=23                    # Mer Boat Loader shell (pre-switch_root). 232
 BOOT_PARTITION="/dev/mmcblk0p34"  # this recovery exposes no by-name symlinks
 HTTP_PORT=8000
 
-RELEASE_DIR="/opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep"
-RECOVERY_IMG="/opencloud/hadk/out/target/product/karatep/hybris-recovery.img"
+ANDROID_ROOT="${ANDROID_ROOT:-/opencloud/hadk}"
+RELEASE_DIR=""                    # auto-discovered below unless --release-dir is given
+RECOVERY_IMG="$ANDROID_ROOT/out/target/product/karatep/hybris-recovery.img"
 SKIP_FASTBOOT=0
 
 while [ $# -gt 0 ]; do
@@ -47,9 +48,29 @@ for tool in python3 fastboot; do
     command -v "$tool" >/dev/null || die "$tool is not installed"
 done
 
-ROOTFS=$(ls -1 "$RELEASE_DIR"/sailfishos-karatep-release-*.tar.bz2 2>/dev/null | head -1) \
-    || die "no rootfs tarball in $RELEASE_DIR"
-[ -n "$ROOTFS" ] || die "no sailfishos-karatep-release-*.tar.bz2 in $RELEASE_DIR"
+# The image directory and tarball names depend on how the image was built:
+# build_packages.sh -i names them from the droid-config kickstart
+# (SailfishOScommunity-release-$RELEASE-$DEVICE/sfe-$DEVICE-$RELEASE.tar.bz2), while a
+# manual `mic create fs` may produce sailfishos-$DEVICE-release-$RELEASE.tar.bz2. Rather
+# than hardcode either, find the newest directory that actually holds a rootfs tarball.
+find_rootfs() {
+    local dir=$1
+    ls -1t "$dir"/sfe-*.tar.bz2 "$dir"/sailfishos-*.tar.bz2 2>/dev/null | head -1
+}
+
+if [ -n "$RELEASE_DIR" ]; then
+    ROOTFS=$(find_rootfs "$RELEASE_DIR")
+    [ -n "$ROOTFS" ] || die "no rootfs tarball (sfe-*.tar.bz2 / sailfishos-*.tar.bz2) in $RELEASE_DIR"
+else
+    # Newest tarball one level below $ANDROID_ROOT wins; skip archived builds.
+    ROOTFS=$(ls -1t "$ANDROID_ROOT"/*/sfe-*.tar.bz2 \
+                    "$ANDROID_ROOT"/*/sailfishos-*.tar.bz2 2>/dev/null \
+             | grep -vE '\.(prev|old|bak)/' | head -1 || true)
+    [ -n "$ROOTFS" ] \
+        || die "could not find a built image under $ANDROID_ROOT -- pass --release-dir explicitly"
+    RELEASE_DIR=$(dirname "$ROOTFS")
+fi
+
 BOOT_IMG="$RELEASE_DIR/hybris-boot.img"
 [ -f "$BOOT_IMG" ] || die "missing $BOOT_IMG"
 [ -f "$RECOVERY_IMG" ] || die "missing $RECOVERY_IMG"
