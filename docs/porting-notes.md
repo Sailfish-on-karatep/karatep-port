@@ -258,6 +258,82 @@ proxy should not gate the display.
 
 ---
 
+## Boot splash (not possible with `HYBRIS_BOOTLOGO`)
+
+Between the Lenovo bootloader logo and lipstick the screen is black for ~75 s, which reads as a
+hang. The obvious fix — hybris-boot's `HYBRIS_BOOTLOGO`, which makes the initrd run
+`zcat /bootsplash.gz > /dev/fb0` — **cannot work on this device**. It is disabled in
+[`hybris-boot/Android.mk`](https://github.com/Sailfish-on-karatep/hybris-boot), where the same
+explanation is kept inline.
+
+**No upstream guidance exists.** The [HADK](https://hadk.sailfishos.org/) (all chapters),
+[`hadk-faq`](https://github.com/mer-hybris/hadk-faq) and
+[HADK Hot](https://sailfishos.wiki/books/hardware/page/hadk-hot) contain **zero** mentions of a
+boot splash, boot logo, `HYBRIS_BOOTLOGO` or `/dev/fb0`. HADK Hot's single mention of
+`bootanimation` — `ANDROID_ROOT="/system" /system/bin/bootanimation` — is a *graphics-stack test
+binary* listed beside `surfaceflinger` for use after `systemctl mask user@100000`. It is not a
+splash mechanism. Do not go looking again.
+
+**Why the write fails.** `/init.log` shows `zcat: write error: No such device` (ENODEV) on every
+attempt. mdss defines no `.fb_write`, so generic `fb_write()` from `fbmem.c` runs, and it returns
+`-ENODEV` whenever `info->screen_base` is NULL. On karatep it is always NULL, because of a
+device-tree/driver mismatch in our own kernel:
+
+```c
+/* drivers/video/msm/mdss/mdss_fb.c — mdss_fb_alloc_fbmem_iommu() */
+fbmem_pnode = of_parse_phandle(pdev->dev.of_node, "linux,contiguous-region", 0);
+if (!fbmem_pnode) {
+        mfd->fbi->screen_base = NULL;   /* no memory... */
+        mfd->fbi->fix.smem_start = 0;
+        return 0;                       /* ...and it reports success */
+}
+```
+
+```dts
+/* arch/arm64/boot/dts/qcom/msm8937-mdss.dtsi:193 */
+mdss_fb0: qcom,mdss_fb_primary {
+        compatible = "qcom,mdss-fb";
+        qcom,cont-splash-memory {                       /* child node! */
+                linux,contiguous-region = <&cont_splash_mem>;
+        };
+};
+```
+
+The property is one level below where the driver looks, so `of_parse_phandle()` returns NULL and
+the framebuffer gets no memory — silently, with no warning. It is allocated lazily by
+`mdss_fb_mmap()` under `if (!mfd->fbi->screen_base)`, and nothing in the initramfs ever mmaps fb0.
+
+Reproduce it on a booted device (stop the UI first, per HADK Hot):
+
+```sh
+systemctl stop user@100000
+python3 -c 'import os; fd=os.open("/dev/fb0", os.O_RDWR); os.write(fd, b"\xff"*4352*1920)'
+# OSError: [Errno 19] No such device
+systemctl start user@100000
+```
+
+**Second, independent blocker.** Even with memory, the panel is composited by MDP5: the visible
+image comes from pipes reprogrammed only on an explicit commit (`mdss_mdp_overlay.c:3383` has a
+dedicated "pan display is called before handoff is completed" branch), and `/proc/cmdline`
+confirms continuous splash is on:
+
+```
+mdss_mdp.panel=1:dsi:0:qcom,mdss_dsi_nt35596_tm_1080p_video:1:none:cfg:single_dsi
+                                                            ^ cont_splash_enabled
+```
+
+A `memcpy` into `smem` is never scanned out. A working splash therefore needs a small initramfs
+helper doing `open` → `mmap` → `memcpy` → `FBIOPAN_DISPLAY`, not a shell redirect.
+`initramfs/bootsplash.gz` and [`scripts/make-bootsplash.py`](../scripts/make-bootsplash.py) are
+kept for whoever writes it.
+
+> **Dead ends, recorded so they are not retried:** writing the image into both framebuffer
+> buffers (the offset is not the problem); correcting the image geometry to stride 4352 × 1920
+> (the size was already right — it matches `stride * virtual_h` exactly); and retrying the write
+> up to 15 times (it can never succeed, and cost 15 s on every boot until reverted).
+
+---
+
 ## Known-good workarounds (not yet root-caused)
 
 * **`bluebinder` and WLAN conflict at boot.** With `bluebinder` unmasked, `wlan0` never
@@ -267,6 +343,11 @@ proxy should not gate the display.
 * **`ofono` sometimes needs `systemctl restart ofono` after boot** for RIL to come up.
 * **To escape a bootloop**, create `/data/.stowaways/sailfishos/init_enter_debug2`. init then
   halts before starting systemd and telnet is available on port 2323. (Thanks @mal)
+* **Always reboot with `reboot -f`.** A graceful `reboot` hangs indefinitely — once observed
+  wedged for ~36 minutes with `systemctl is-system-running` reporting `initializing` and 46 jobs
+  queued. `droid-hal-init.service` never stops, so systemd waits for it forever. `-f` skips the
+  shutdown transaction. This matters when a fix is applied over telnet: without `-f` the device
+  appears to have crashed.
 
 ---
 

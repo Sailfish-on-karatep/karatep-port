@@ -15,17 +15,22 @@ Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on t
 
 ### Currently working on
 
-Rebuilding and reflashing with the linker-configuration fix
-([`0042`](https://github.com/Sailfish-on-karatep/karatep-patches/blob/hybris-18.1/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch)),
-so the UI comes up without the old `killall vndservicemanager` workaround. Next after that:
-the IMS daemon crash-loop and the `bluebinder` / WLAN conflict.
+Bluetooth: the Qualcomm HAL aborts with `controller init failed` roughly every 61 s. Next after
+that: the IMS daemon crash-loop, and mobile data.
 
 ### Recently fixed
 
 | | |
 |---|---|
-| **No UI until `killall vndservicemanager`** | Early vendor services linked the system copy of `libbinder` (`SYST`) instead of the VNDK copy (`VNDR`), so every `/dev/vndbinder` lookup was rejected and the graphics composer crash-looped. → [full analysis](docs/rca/vndservicemanager-libbinder.md) |
+| **No UI until `killall vndservicemanager`** | Early vendor services linked the system copy of `libbinder` (`SYST`) instead of the VNDK copy (`VNDR`), so every `/dev/vndbinder` lookup was rejected and the graphics composer crash-looped. Verified on hardware: composer starts once, no `Parcel` errors, lipstick comes up unaided. → [full analysis](docs/rca/vndservicemanager-libbinder.md) |
+| **WLAN did not come up** | Two independent causes: `wlan.ko` must match the running kernel exactly (so droid-hal has to be rebuilt after *any* kernel change), and it must be loaded early by `wlan-module-load.service` — a late `modprobe` always returns `ENODEV`. → [details](docs/porting-notes.md#wlan) |
 | **Build died on `external/chromium-webview`** | LineageOS' manifest links a file that no longer exists upstream, leaving a dangling symlink. The project is now dropped in [`manifests/local_manifests.xml`](manifests/local_manifests.xml). |
+
+### Closed as not fixable in this form
+
+| | |
+|---|---|
+| **No Sailfish boot splash** (black screen between the Lenovo logo and the UI) | hybris-boot's `HYBRIS_BOOTLOGO` writes the image with `zcat > /dev/fb0`, which on this panel always fails with `ENODEV`: a device-tree/driver mismatch leaves the framebuffer with no backing memory until something `mmap()`s it. Disabled. A splash would need an initramfs helper doing `mmap` + `FBIOPAN_DISPLAY`. → [details](docs/porting-notes.md#boot-splash-not-possible-with-hybris_bootlogo) |
 
 ### Hardware
 
