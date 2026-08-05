@@ -1,107 +1,130 @@
-SailfishOS HADK Scratchpad for lenovo_karatep
-- based on lineage/hybris-18.1
+# Sailfish OS for the Lenovo Vibe K6 Note / Plus (`karatep`)
 
-Status
+An unofficial Sailfish OS **5.1.0.11 (Pispala)** hardware adaptation for the Lenovo Vibe K6
+Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on the
+**LineageOS 18.1 / Android 11** hybris base, `aarch64` userspace, Linux 3.18.
 
-| **Feature**           | **Status**             |
-|-----------------------|------------------------|
-| **Linux Kernel**      | 3.18                   |
-| **Display**           | Y                      |
-| **Touch**             | Y                      |
-| **Notification LED**  | Unknown (lights up)    |
-| **Audio**             |                        |
-| - Loudspeaker         | Y                      |
-| - 3.5mm               | N (detected)           |
-| - Earpiece            | Unknown                |
-| - BT audio            | N                      |
-| **NFC**               | NA                     |
-| **Bluetooth**         | Y (needs testing)      |
-| **GSM**               |                        |
-| - Slot 1              |                        |
-|   - Signal            | Y                      |
-|   - Call              | Unknown                |
-|   - Data              | N                      |
-|   - SMS               | Unknown                |
-|   - VoLTE             | jolla proprietary      |
-| - Slot 2              | Network: Denied        |
-| **WLAN**              |                        |
-| - Connect             | N                      |
-| - Hotspot             | N                      |
-| **GPS**               | Unknown                |
-| **Camera**            |                        |
-| - Front               | Y                      |
-| - Rear                | Y                      |
-| - Flash               | Unknown                |
-| **Fingerprint**       | N                      |
-| **Sensors**           | Unknown (rotation works)|
-| - ALS                 |                        |
-| - PS                  |                        |
-| - Accel.              |                        |
-| - Gyro.               |                        |
-| - Magne.              |                        |
-| **Keys**              |                        |
-| - Power               | Y                      |
-| - Vol+                | Y                      |
-| - Vol-                | Y                      |
-| - Soft keys           |                        |
-|   - Back              | Y                      |
-|   - Home              | N                      |
-|   - Nav               | N                      |
-| **Vibra**             | Y                      |
-| **Haptics**           | NA                     |
-| **Power Mgmt.**       | Unknown                |
-| **RTC alarms**        | Unknown                |
-| **USB**               |                        |
-| - Net                 | Y                      |
-| - Data                | Y                      |
-| - Charge              | Y                      |
-| **FM Radio**          | Unknown                |
+> This is the documentation hub for the [Sailfish-on-karatep](https://github.com/Sailfish-on-karatep)
+> organisation. Start here.
 
-To fix:
-- systemctl restart ofono on boot
-- 3.5mm audio routing
-- RIL flaky
-- Cameras flaky
-- Rahul, [9/17/24 2:20 AM]
-Okay, so I tried to restart the device. This time bluebinder is unmasked. wlan0 doesn't show up. modprobe wlan says no device named wlan. BT MAC is okay, however bluebinder doesn't start, stays at "activating". Masked bluebinder and restarted, wlan works fine. Also, BT works when I start bluebinder service after boot
+---
 
-Rahul, [9/17/24 2:21 AM]
-Could this be related to wlan mac being incorrect?
+## Build status
 
-Pixel ratio is 1.6
+**Boots to UI.** The device reaches the Sailfish OS home screen unaided.
 
-Notes:
-- **[SOLVED] No UI until `killall vndservicemanager`** — full root-cause analysis in
-  [vndservicemanager_libbinder_rca.md](vndservicemanager_libbinder_rca.md). Short version:
-  hybris compiles out Android's mount namespaces, so `/linkerconfig` only switches from the
-  bootstrap config to the APEX-aware one at `on post-fs-data`, which is *after* `on init`
-  has started `vndservicemanager`. It therefore links `/system/lib64/libbinder.so` (`SYST`)
-  while every vendor client uses the VNDK copy (`VNDR`), so all `/dev/vndbinder` lookups are
-  rejected and `hwcomposer-2-1` crash-loops. Fixed by
-  `hybris-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`.
-- Updated/recent hybris patches are at hadk-hot. Refer them along with/instead of hadk-faq. https://sailfishos.wiki/books/hadk/page/hadk-hot#bkmrk-common
-- <mal> only relevant part from 16 in 18.1 base is cloning libhybris
-- Add LOS devicesettings: https://github.com/tanvirr007/CustomROM_build_guide_aosp
-- Kernel bootflags to be set in BoardConfig.mk
-- Make selinux permissive by setting selinux=1 in kernel bootflags
-- Copy selinux files from /vendor on device while applying hybris-17.1 patched mentioned in hadk-faq. Do not symlink, replace with actual files (Thanks @mal)
-- /system -> / system partition is actually android root partition and the actual system is in /system/system so replacing /system with / in fstab. fstab is at: device/lenovo/karate-common/rootdir/etc/fstab.qcom (Thanks @mal)
-- Disable audit logs by setting audit=0 in kernel bootflags (Thanks @elros34)
-- Stop system init to prevent bootloop: Create file init_enter_debug2 to sailfish os root i.e. in /data/.stowaways/sailfishos/init_enter_debug2 (Thanks @mal)
-- Files on dcd/sparse/ gets copied onto the device.
-- Symlink /apex .so libraries into /odm on device or /sparse/odm on dev machine.
-- Spam "Expecting header 0x53595354 but found 0x564e4452. Mixing copies of libbinder?". Fixed by applying the patch for generating dynamic linker config for flattened APEX namespaces in `system/core/init` and `mount_namespace.cpp`.
-- Missing battery info? Add hw-settings.ini to specify sensor information. Refer hadk-faq
-- Sailjail fixes: Enable CONFIG_UTS_NS, CONFIG_IPC_NS, CONFIG_USER_NS, CONFIG_PID_NS, CONFIG_NET_NS, CONFIG_NF_CONNTRACK_NETBIOS_NS in karatep_defconfig
+### Currently working on
 
-Resources:
-- (ofono conflict) https://sailfishos.wiki/books/hadk/page/hadk-hot https://irclogs.sailfishos.org/logs/%23sailfishos-porters/%23sailfishos-porters.2023-02-03.log.html
-- (setup selinux permissive) https://piggz.co.uk/sailfishos-porters-archive/index.php?log=2024-08-20.txt#line64
-- (patch apex) If apexd-bootstrap fails because of not updatable/flattened apexes here is experimental fix: https://paste.debian.net/hidden/a2302262/ (Thanks @elros34)
+Rebuilding and reflashing with the linker-configuration fix
+([`0042`](https://github.com/Sailfish-on-karatep/hybris-patches/blob/hybris-18.1/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch)),
+so the UI comes up without the old `killall vndservicemanager` workaround. Next after that:
+the IMS daemon crash-loop and the `bluebinder` / WLAN conflict.
 
-Commands:
-- (Update Platform SDK, Tooling, and Target): "sdk-foreach-su -ly ssu re some_version" then "sdk-foreach-su -ly zypper ref" and finally "sdk-foreach-su -ly zypper dup"
+### Recently fixed
 
-Reverse internet tethering:
-- Follow HADK
-- https://forum.sailfishos.org/t/using-internet-over-rndis-usb-computer-reverse-tethering/10104/6
+| | |
+|---|---|
+| **No UI until `killall vndservicemanager`** | Early vendor services linked the system copy of `libbinder` (`SYST`) instead of the VNDK copy (`VNDR`), so every `/dev/vndbinder` lookup was rejected and the graphics composer crash-looped. → [full analysis](docs/rca/vndservicemanager-libbinder.md) |
+| **Build died on `external/chromium-webview`** | LineageOS' manifest links a file that no longer exists upstream, leaving a dangling symlink. The project is now dropped in [`manifests/local_manifests.xml`](manifests/local_manifests.xml). |
+
+### Hardware
+
+| Subsystem | Status | Notes |
+|---|---|---|
+| Display | ✅ | pixel ratio 1.6 |
+| Touch | ✅ | |
+| Graphics / UI | ✅ | `hwcomposer-2-1` + lipstick |
+| Cameras (front & rear) | ⚠️ | work, but flaky |
+| Camera flash | ❓ | untested |
+| Audio — loudspeaker | ✅ | |
+| Audio — 3.5 mm | ❌ | jack detected, not routed |
+| Audio — earpiece | ❓ | untested |
+| Audio — Bluetooth | ❌ | |
+| Bluetooth | ⚠️ | works only if `bluebinder` is started manually after boot |
+| WLAN | ⚠️ | works only with `bluebinder` masked — the two conflict at boot |
+| WLAN hotspot | ❌ | |
+| Cellular — signal (SIM 1) | ✅ | |
+| Cellular — calls / SMS | ❓ | untested |
+| Cellular — mobile data | ❌ | |
+| Cellular — SIM 2 | ❌ | "Network: Denied" |
+| VoLTE | ➖ | needs Jolla proprietary bits |
+| GPS | ❓ | untested |
+| Sensors | ⚠️ | rotation works; individual sensors unverified |
+| Fingerprint (FPC 1020) | ❌ | |
+| Vibration | ✅ | |
+| Notification LED | ⚠️ | lights up, behaviour unverified |
+| Keys — power, volume | ✅ | |
+| Keys — back | ✅ | |
+| Keys — home, nav | ❌ | |
+| USB — networking, data, charging | ✅ | |
+| Power management | ❓ | untested |
+| RTC alarms | ❓ | untested |
+| FM radio | ❓ | untested |
+| NFC | ➖ | no hardware |
+
+✅ works · ⚠️ partial / needs a workaround · ❌ broken · ❓ untested · ➖ not applicable
+
+---
+
+## Where to find what
+
+### In this repo
+
+| Path | What it is |
+|---|---|
+| [`docs/flashing.md`](docs/flashing.md) | **Start here to install.** Step-by-step flashing guide, plus troubleshooting for the errors this device actually produces. |
+| [`docs/porting-notes.md`](docs/porting-notes.md) | Accumulated device knowledge: partition map, fixes already in the tree, known workarounds, how to debug the boot. |
+| [`docs/rca/`](docs/rca/) | Root-cause write-ups for bugs that were properly diagnosed. |
+| [`docs/useful-commands.md`](docs/useful-commands.md) | Short command reference (rebooting to fastboot/recovery from Sailfish, etc.). |
+| [`manifests/local_manifests.xml`](manifests/local_manifests.xml) | The `repo` local manifest. Copy to `$ANDROID_ROOT/.repo/local_manifests/`. |
+| [`scripts/flash.sh`](scripts/flash.sh) | Semi-automated flasher; discovers the USB network address itself. |
+
+### Other repos in the organisation
+
+| Repo | Role |
+|---|---|
+| [`hybris-patches`](https://github.com/Sailfish-on-karatep/hybris-patches) | **Superset of `mer-hybris/hybris-patches`** — the full upstream series plus the karatep patches, numbered so `apply-patches.sh` applies them in dependency order. All Android-source changes live here; nothing is edited in the tree by hand. |
+| [`android_device_lenovo_karatep`](https://github.com/Sailfish-on-karatep/android_device_lenovo_karatep) | Device tree. |
+| [`android_device_lenovo_karate-common`](https://github.com/Sailfish-on-karatep/android_device_lenovo_karate-common) | Shared `karate` family device tree (`fstab.qcom` lives here). |
+| [`android_kernel_lenovo_msm8937`](https://github.com/Sailfish-on-karatep/android_kernel_lenovo_msm8937) | Kernel 3.18 + `karatep_defconfig`. |
+| [`proprietary_vendor_lenovo`](https://github.com/Sailfish-on-karatep/proprietary_vendor_lenovo) | Vendor blobs. |
+| [`droid-hal-karatep`](https://github.com/Sailfish-on-karatep/droid-hal-karatep) | `droid-hal` packaging (`rpm/`). |
+| [`droid-config-karatep`](https://github.com/Sailfish-on-karatep/droid-config-karatep) | Sailfish-side device configuration, `sparse/` overlay, patterns, kickstart. |
+| [`droid-hal-version-karatep`](https://github.com/Sailfish-on-karatep/droid-hal-version-karatep) | Version package. |
+
+---
+
+## Building
+
+Follow the [HADK](https://hadk.sailfishos.org/) — this port adds nothing unusual to the
+procedure. In outline, with `$ANDROID_ROOT` set:
+
+```sh
+# 1. Sources. local_manifests.xml pins the karatep repos and the hybris-patches superset.
+repo init -u https://github.com/mer-hybris/android.git -b hybris-18.1
+cp manifests/local_manifests.xml $ANDROID_ROOT/.repo/local_manifests/karatep.xml
+repo sync
+
+# 2. Patches. Nothing is applied by hand.
+hybris-patches/apply-patches.sh --mb
+
+# 3. Android HAL (HABUILD SDK)
+source build/envsetup.sh && lunch lineage_karatep-userdebug
+make -j$(nproc) hybris-hal droidmedia
+
+# 4. Sailfish packages and image (PLATFORM SDK)
+rpm/dhd/helpers/build_packages.sh
+```
+
+Then see [`docs/flashing.md`](docs/flashing.md).
+
+---
+
+## Credits
+
+Built on the work of the Sailfish OS porters community — particularly **@mal** and
+**@elros34** on `#sailfishos-porters`, whose advice is cited throughout
+[`docs/porting-notes.md`](docs/porting-notes.md).
+
+Sailfish OS is a product of [Jolla](https://jolla.com/). This is an unofficial community
+adaptation with no affiliation or warranty.

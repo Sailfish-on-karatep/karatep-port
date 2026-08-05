@@ -48,4 +48,24 @@
 	<remove-project name="mer-hybris/hybris-patches" />
 	<project path="hybris-patches"
 		name="Sailfish-on-karatep/hybris-patches" revision="hybris-18.1" />
+
+	<!--
+	  Drop the Chromium WebView patches project.
+
+	  LineageOS' manifest (snippets/lineage.xml) declares
+
+	      <linkfile src="Android.mk" dest="external/chromium-webview/Android.mk" />
+
+	  but the patches repo no longer ships Android.mk - it was renamed to
+	  os_pickup.mk upstream. repo therefore creates a DANGLING symlink at
+	  external/chromium-webview/Android.mk, which ckati then tries to read:
+
+	      build/make/core/prebuilt.mk:53: error:
+	          external/chromium-webview/Android.mk: No such file or directory
+
+	  and the whole hybris-hal build dies. Sailfish OS never builds or ships
+	  Android's WebView (the prebuilt webview projects are commented out in
+	  lineage.xml too), so the cleanest fix is not to sync the project at all.
+	-->
+	<remove-project name="LineageOS/android_external_chromium-webview_patches" />
 </manifest>
