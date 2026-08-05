@@ -184,6 +184,80 @@ See [Verify the boot image before flashing](#verify-the-boot-image-before-flashi
 
 ---
 
+## WLAN
+
+Working. `wlan0` comes up at boot with a real MAC and connman scans normally:
+
+```
+wlan  3795573  0
+wlan0  UP  00:0a:f5:02:15:e4
+wlan: WCNSS software version CNSS-PR-4-0-00325
+wlan: WCNSS hardware version WCN v2.0 RadioPhy with 19.2MHz XO
+```
+
+Two things matter, and both produce the same unhelpful symptom (`no wlan0`):
+
+**1. The module must match the running kernel exactly.** `wlan.ko` lives in
+`/lib/modules/$(uname -r)/`, shipped by `droid-hal-karatep-kernel-modules`. Any kernel change
+alters the version string, so flashing a new `hybris-boot.img` **without** rebuilding
+droid-hal and reinstalling the rootfs leaves the modules stranded under the old directory:
+
+```
+modprobe: FATAL: Module wlan not found in directory /lib/modules/3.18.124-perf-ga8b7042c2a84
+```
+
+Always rebuild `--droid-hal` (and the image) after touching the kernel — the boot partition and
+the rootfs modules are a matched pair.
+
+**2. The module must be loaded early, by `wlan-module-load.service`.** Loading it later always
+fails, even with the correct module, WCNSS online and the platform device bound:
+
+```
+modprobe: ERROR: could not insert 'wlan': No such device
+```
+
+`dmesg` shows `wlan: loading driver v3.0.11.85.9` and then nothing — the probe finds no device
+and the module unloads. The service exists precisely for this (HADK-HOT: *"if a particular
+driver needs firmware before partitions are mounted, building the driver as a module and
+creating a systemd service (like for wlan) which will modprobe it might help"*). Do not
+diagnose WLAN by hand-modprobing after boot; reboot and let the unit do it.
+
+Things that look suspicious here but are **not** the problem, all verified:
+`droid.late_start=trigger_late_start` is set, `wcnss_service` is running, `subsys2: wcnss=ONLINE`,
+the PIL firmware images (`wcnss.b00`…) are present, and `a000000.qcom,wcnss-wlan` is bound to
+the `wcnss_wlan` platform driver.
+
+---
+
+## Bluetooth (broken)
+
+`android.hardware.bluetooth@1.0-service-qti` aborts itself roughly every 61 s:
+
+```
+vendor.qti.bluetooth@1.0-data_handler: Aborting daemon to recover as controller init failed
+libc: Fatal signal 6 (SIGABRT) in tid NNNN (bluetooth@1.0-s)
+droid-hal-init: Service 'vendor.bluetooth-1-0-qti' (pid NNNN) received signal 6
+hwservicemanager: Since android.hardware.bluetooth@1.0::IBluetoothHci/default is not
+                  registered, trying to start it as a lazy HAL.
+```
+
+so `bluebinder` never activates and loops `Bluetooth binder service failed / Remote has died`,
+climbing hci index each time (`Own hci index: 5`).
+
+The HADK-FAQ prerequisites for binderized Bluetooth are already met — `CONFIG_BT_HCIVHCI=y` is
+in the defconfig and bluebinder is installed — so this is device-specific controller bring-up,
+not missing setup. The SMD transport nodes exist and are owned correctly
+(`/dev/smd2`, `/dev/smd3`, `bluetooth:bluetooth`).
+
+**Workaround:** `systemctl mask bluebinder`. With it masked the BT HAL starts once and stays
+put instead of crash-looping.
+
+**Also wrong regardless of the HAL bug:** `bluebinder.service` is `WantedBy=graphical.target`
+*and* `Before=graphical.target`, so while it is stuck activating it delays the UI. A Bluetooth
+proxy should not gate the display.
+
+---
+
 ## Known-good workarounds (not yet root-caused)
 
 * **`bluebinder` and WLAN conflict at boot.** With `bluebinder` unmasked, `wlan0` never
