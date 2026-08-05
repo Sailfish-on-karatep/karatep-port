@@ -20,10 +20,10 @@ echo "mount -t ext4 /dev/block/bootdevice/by-name/userdata /data" > /init-ctl/st
 echo "rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos" > /init-ctl/stdin
 
 # (Change 192.168.2.14 to your host PC's actual USB IP if different)
-echo "wget -O - http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
+echo "curl -f -L http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
 
 # Flash the kernel to boot partition
-echo "wget -O /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
+echo "curl -f -L -o /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
 echo "dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot" > /init-ctl/stdin
 
 echo "reboot" > /init-ctl/stdin

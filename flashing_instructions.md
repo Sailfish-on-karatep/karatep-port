@@ -64,13 +64,13 @@ The Sailfish emergency shell exposes a USB network interface. We will serve the 
    
    *Stream and extract the OS directly (replace IP with your host IP):*
    ```bash
-   echo "wget -O - http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
+   echo "curl -f -L http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
    ```
    *(Wait for the file extraction to complete in the `init.log` output).*
 
    *Flash the Sailfish OS kernel permanently to the boot partition:*
    ```bash
-   echo "wget -O /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
+   echo "curl -f -L -o /tmp/hybris-boot.img http://192.168.2.14:8000/hybris-boot.img" > /init-ctl/stdin
    echo "dd if=/tmp/hybris-boot.img of=/dev/block/bootdevice/by-name/boot" > /init-ctl/stdin
    ```
 
