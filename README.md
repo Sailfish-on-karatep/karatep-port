@@ -58,7 +58,6 @@ Status
 | **FM Radio**          | Unknown                |
 
 To fix:
-- killall vndservicemanager on boot
 - systemctl restart ofono on boot
 - 3.5mm audio routing
 - RIL flaky
