@@ -40,8 +40,8 @@ the IMS daemon crash-loop and the `bluebinder` / WLAN conflict.
 | Audio — 3.5 mm | ❌ | jack detected, not routed |
 | Audio — earpiece | ❓ | untested |
 | Audio — Bluetooth | ❌ | |
-| Bluetooth | ⚠️ | works only if `bluebinder` is started manually after boot |
-| WLAN | ⚠️ | works only with `bluebinder` masked — the two conflict at boot |
+| Bluetooth | ❌ | BT HAL aborts on "controller init failed"; `bluebinder` masked → [details](docs/porting-notes.md#bluetooth-broken) |
+| WLAN | ✅ | `wlan0` up at boot, connman scans and lists APs |
 | WLAN hotspot | ❌ | |
 | Cellular — signal (SIM 1) | ✅ | |
 | Cellular — calls / SMS | ❓ | untested |
