@@ -139,7 +139,7 @@ if ! port_open "$TELNET_PORT"; then
     if port_open 2323; then
         warn "Port $TELNET_PORT is closed but 2323 is open: the recovery switch_root'ed into"
         warn "the existing install. Setting /init_enter_debug so it halts before that."
-        python3 - <<'PYEOF' || die "could not set /init_enter_debug over the 2323 shell"
+        DEVICE_IP="$DEVICE_IP" python3 - <<'PYEOF' || die "could not set /init_enter_debug over the 2323 shell"
 import os, socket, time
 s = socket.create_connection((os.environ["DEVICE_IP"], 2323), timeout=15)
 time.sleep(2)
@@ -222,10 +222,19 @@ def drain(seconds=2.0):
 
 
 def run(cmd, settle=2.0, quiet=False):
-    """Run one command, return its output. Uses a sentinel so we know it finished."""
-    marker = "__done_%d__" % time.time_ns()
-    sock.sendall(f"{cmd}; echo {marker}$?\n".encode())
-    out, end = "", time.time() + 900          # extraction can legitimately take minutes
+    """Run one command, return its output. Uses a sentinel so we know it finished.
+
+    The sentinel is sent SPLIT ("__done""_123__") so the literal string only ever
+    appears in the command's *output*, never in the shell's echo of the input
+    line. Matching the echo instead of the output is a trap: the wait returns
+    instantly, and the next command then runs while this one is still going --
+    which previously made the rootfs check read wget's progress bar and report a
+    corrupt extraction.
+    """
+    tag = time.time_ns()
+    marker = "__done_%d__" % tag
+    sock.sendall(('%s; echo "__done""_%d__"$?\n' % (cmd, tag)).encode())
+    out, end = "", time.time() + 1800         # extraction over USB is slow
     while time.time() < end:
         out += drain(settle)
         if marker in out:
