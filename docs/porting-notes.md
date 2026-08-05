@@ -131,6 +131,59 @@ Pitfalls* also says a `--force-sync` should be followed by a full `repo sync`.
 
 ---
 
+## Build environment gotchas
+
+Three problems that stayed hidden because the original build environment had accumulated
+state by hand. None would survive a rebuild on another machine, so they are worth knowing.
+
+### scratchbox2 does not follow the `/opencloud` symlink
+
+In the Platform SDK the workspace is reachable as `/opencloud` (a symlink to
+`/parentroot/opencloud`). Ordinary shell commands follow it; **sb2 does not**:
+
+```sh
+sb2 -t lenovo-karatep-aarch64 ls /opencloud/hadk/.mb2/spec              # No such file or directory
+sb2 -t lenovo-karatep-aarch64 ls /parentroot/opencloud/hadk/.mb2/spec   # works
+```
+
+`mb2` runs `rpmbuild` under sb2, so with the symlinked form every package build fails with
+
+```
+error: Unable to open $ANDROID_ROOT/.mb2/spec: No such file or directory
+!! building of package failed
+```
+
+`$ANDROID_ROOT` must be `/parentroot/opencloud/hadk` inside the Platform SDK. The droid-config
+kickstart already uses that form for the local repo. A build target created *before* the
+symlink existed keeps working with the wrong form, which is why this only appeared after the
+target was recreated.
+
+### A stale `repodata/` silently disables the local RPM repo
+
+`build_packages.sh` adds the locally built RPMs with `zypper --plus-repo dir:$LOCAL_REPO`. A
+`dir:` URI is a **plaindir** repo — zypper scans the `.rpm` files directly. The helper
+deliberately writes `createrepo_c` output to `$LOCAL_REPO/repo`, with the comment *"so that
+`zypper --plus-repo` does not pick it up"*.
+
+If anything leaves a `repodata/` directory in `$LOCAL_REPO` itself (for example a `createrepo`
+run by hand), zypper treats the repo as rpm-md instead, fails the signature check on the
+unsigned metadata, and drops the repo entirely:
+
+```
+Repository 'dir:.../droid-local-repo/karatep' is invalid.
+ - Signature verification failed for repomd.xml
+No provider of 'libhybris-libEGL' found.
+```
+
+Packages you just built become invisible to the next package that needs them. Fix: remove
+`$ANDROID_ROOT/droid-local-repo/$DEVICE/repodata` (keep `repo/` — the kickstart points at it).
+
+### `cpio` is missing from the chroot
+
+See [Verify the boot image before flashing](#verify-the-boot-image-before-flashing) above.
+
+---
+
 ## Known-good workarounds (not yet root-caused)
 
 * **`bluebinder` and WLAN conflict at boot.** With `bluebinder` unmasked, `wlan0` never
