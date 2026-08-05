@@ -1,55 +1,24 @@
-# ==============================================================================
-# COPY-PASTABLE COMMANDS TO FLASH SAILFISH OS VIA HYBRIS-RECOVERY (TELNET)
-# ==============================================================================
+# 1. Wipe Data in TWRP
+# Boot to TWRP and Factory Reset. Do NOT wipe Vendor or System.
 
-# ------------------------------------------------------------------------------
-# TERMINAL 1: ON YOUR HOST MACHINE (PC)
-# ------------------------------------------------------------------------------
+# 2. Flash hybris-boot.img and boot it
+fastboot flash boot hybris-boot.img
+fastboot reboot
 
-# 1. Go to the directory containing the mic generated zip file
-cd /opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep/
-
-# 2. Extract the hybris-boot.img and the rootfs tarball from the zip
-unzip -j SailfishOS-karatep-5.1.0.11-*.zip hybris-boot.img sailfishos-karatep-release-5.1.0.11.tar.bz2
-
-# 3. Put your device into fastboot/bootloader mode (Power + Vol Down), connect via USB, and boot the kernel
-fastboot boot hybris-boot.img
-
-# 4. Wait for the device to boot into the 'mer' debug shell (since it lacks rootfs).
-#    Start a simple python web server so the device can download the rootfs from your PC.
-#    (Leave this terminal running)
+# 3. Start Python Web Server on Host PC
+# (Run this in the directory containing the sailfishos...tar.bz2 file)
 python3 -m http.server 8000
 
+# 4. Connect to Sailfish Pre-Switch_Root Shell
+telnet 192.168.2.15 23
 
-# ------------------------------------------------------------------------------
-# TERMINAL 2: CONNECTING TO THE DEVICE
-# ------------------------------------------------------------------------------
+# 5. Inject Commands (Copy/Paste these one by one)
+tail -f /init.log &
 
-# 1. Open a new terminal on your host and telnet into the device
-telnet 192.168.2.15 2323
+echo "mount -t ext4 /dev/block/bootdevice/by-name/userdata /data" > /init-ctl/stdin
+echo "rm -rf /data/.stowaways/sailfishos && mkdir -p /data/.stowaways/sailfishos" > /init-ctl/stdin
 
-# --- YOU ARE NOW INSIDE THE DEVICE ---
+# (Change 192.168.2.14 to your host PC's actual USB IP if different)
+echo "wget -O - http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2 | tar -xj -C /data/.stowaways/sailfishos" > /init-ctl/stdin
 
-# 2. Mount the userdata partition (where Sailfish OS lives)
-mkdir -p /mnt/data
-mount /dev/mapper/userdata /mnt/data
-# (If /dev/mapper/userdata fails, use: mount /dev/block/bootdevice/by-name/userdata /mnt/data)
-
-# 3. Create the Sailfish OS target directory
-mkdir -p /mnt/data/.stowaways/sailfishos
-cd /mnt/data/.stowaways/sailfishos
-
-# 4. Download the rootfs tarball from your PC's web server
-#    (The PC is available at 192.168.2.14 on the RNDIS network)
-wget http://192.168.2.14:8000/sailfishos-karatep-release-5.1.0.11.tar.bz2
-
-# 5. Extract the rootfs (This will take a few minutes, be patient!)
-tar -xjf sailfishos-karatep-release-5.1.0.11.tar.bz2
-
-# 6. Cleanup the downloaded tarball to save space
-rm sailfishos-karatep-release-5.1.0.11.tar.bz2
-
-# 7. Unmount and reboot into Sailfish OS!
-cd /
-umount /mnt/data
-reboot
+echo "reboot" > /init-ctl/stdin
