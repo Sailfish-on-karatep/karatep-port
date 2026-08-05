@@ -34,6 +34,16 @@ that: the IMS daemon crash-loop, and mobile data.
 
 ### Hardware
 
+> ⚠️ **This table is stale and must not be relied on.** Hands-on testing has shown entries that
+> are simply wrong in both directions — the loudspeaker was marked working and does not work. Treat
+> every row below as *unverified*, including the ✅ ones, until it is re-tested. It is being replaced
+> by an evidence-based `docs/feature-matrix.md`, where each status is backed by a log line, a config
+> line, or a hands-on result.
+>
+> Note also that **cellular cannot currently be tested beyond SIM detection** — only a dummy SIM is
+> available, so mobile data, SMS, calls, VoLTE and the SIM 2 status are unverifiable rather than
+> broken. Camera flash is likewise unverified.
+
 | Subsystem | Status | Notes |
 |---|---|---|
 | Display | ✅ | pixel ratio 1.6 |
