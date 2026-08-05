@@ -112,14 +112,34 @@ repo sync
 hybris-patches/apply-patches.sh --mb       # mer-hybris' series (plain HADK step)
 karatep-patches/apply-patches.sh --mb      # the four karatep patches, on top
 
-# 3. Android HAL (HABUILD SDK)
-source build/envsetup.sh && lunch lineage_karatep-userdebug
-make -j$(nproc) hybris-hal droidmedia
+# 3. Android HAL (HABUILD SDK). HADK specifies `breakfast`, not `lunch`.
+source build/envsetup.sh
+export USE_CCACHE=1
+breakfast karatep
+make -j$(nproc --all) hybris-hal droidmedia
 
-# 4. Sailfish packages and image (PLATFORM SDK). Set RELEASE first — build_packages.sh -i
-#    refuses without it; this port uses RELEASE=5.1.0.11.
-rpm/dhd/helpers/build_packages.sh
+# 4. Droid HAL packaging (PLATFORM SDK, from $ANDROID_ROOT), in this order
+rpm/dhd/helpers/build_packages.sh --droid-hal
+rpm/dhd/helpers/build_packages.sh --configs
+rpm/dhd/helpers/build_packages.sh --mw
+rpm/dhd/helpers/build_packages.sh --gg
+rpm/dhd/helpers/build_packages.sh --version
+
+# 5. Root filesystem image. RELEASE must be exported or --mic refuses to run.
+export RELEASE=5.1.0.11
+rpm/dhd/helpers/build_packages.sh --mic
 ```
+
+> **Check the boot image before flashing.** `Install: … hybris-boot.img` at the end of the
+> Android build is not proof of success: if `hybris/hybris-boot/initramfs/` is empty at build
+> time, hybris-boot happily packs a 20-byte empty ramdisk and the resulting image crashes the
+> device into Qualcomm bulk mode instead of booting. A good `hybris-boot.img` is roughly 1.5 MB
+> larger than `out/target/product/karatep/kernel`; if the difference is a few kilobytes, the
+> initramfs is missing.
+>
+> This is also why `hybris-boot` must be pinned to the fork — the HADK warns that a `repo sync`
+> otherwise resets `fixup-mountpoints`, and a partially-synced `hybris-boot` is what produced
+> the empty initramfs here.
 
 Everything device-specific is either a fork repinned in `local_manifests.xml` (the HADK's
 "Contribute your mods back" pattern) or one of the four patches in `karatep-patches`. There is
