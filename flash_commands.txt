@@ -3,10 +3,11 @@
 
 # 2. Live-boot hybris-recovery (Do NOT flash, to preserve TWRP)
 # Reboot phone to bootloader/fastboot mode first
-fastboot boot hybris-recovery.img
+fastboot boot /opencloud/hadk/out/target/product/karatep/hybris-recovery.img
 
 # 3. Start Python Web Server on Host PC
-# (Run this in the directory containing both sailfishos...tar.bz2 AND hybris-boot.img)
+# (Serve from the directory containing the OS tarball and hybris-boot.img)
+cd /opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep
 python3 -m http.server 8000
 
 # 4. Connect to Sailfish Pre-Switch_Root Shell

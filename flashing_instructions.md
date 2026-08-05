@@ -16,11 +16,17 @@ Sailfish OS needs a clean `/data` partition to unpack its rootfs.
 ## 2. Boot into Sailfish Recovery (Live Boot)
 Since TWRP is often 32-bit and cannot process the 64-bit Sailfish installer scripts (Error 11) or lacks proper tar capabilities (Error 1), we will use the native Sailfish OS `hybris-recovery.img`. To protect your existing TWRP installation, we will live-boot this image into RAM without flashing it.
 
-1. Extract `hybris-recovery.img`, `hybris-boot.img` and `sailfishos-karatep-release-5.1.0.11.tar.bz2` from the generated flashable ZIP on your PC.
+1. Locate your generated files on your host PC:
+   - **Rootfs Tarball**: `/opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep/sailfishos-karatep-release-5.1.0.11.tar.bz2`
+   - **Boot Image**: `/opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep/hybris-boot.img`
+   - **Recovery Image**: `/opencloud/hadk/out/target/product/karatep/hybris-recovery.img`
+   
+   *Tip: Copy `hybris-recovery.img` into the `/opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep/` folder so everything is in one place.*
+
 2. Put the phone into Fastboot/Bootloader mode.
 3. Live-boot the Sailfish OS recovery image into RAM:
    ```bash
-   fastboot boot hybris-recovery.img
+   fastboot boot /opencloud/hadk/out/target/product/karatep/hybris-recovery.img
    ```
 4. The device will boot. Since it has no touch UI, it will appear stuck on the Lenovo splash screen, but it will automatically expose an emergency network shell over USB.
 
@@ -28,8 +34,9 @@ Since TWRP is often 32-bit and cannot process the 64-bit Sailfish installer scri
 The Sailfish emergency shell exposes a USB network interface. We will serve the root filesystem from your host PC and command the device to download and extract it.
 
 1. **Start the Web Server:**
-   On your host PC, navigate to the folder containing the extracted files and start a Python HTTP server:
+   On your host PC, navigate to the folder containing the tarball and boot image, and start a Python HTTP server:
    ```bash
+   cd /opencloud/hadk/SailfishOScommunity-release-5.1.0.11-karatep
    python3 -m http.server 8000
    ```
    *(Note your host PC's IP address on the new USB interface, usually `192.168.2.14` or similar).*
