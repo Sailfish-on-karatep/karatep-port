@@ -3,7 +3,7 @@
 Device: **lenovo/karatep** — Lenovo Vibe K6 Note / Plus, **MSM8937 / Snapdragon 430**, Adreno 505.
 Base: LineageOS 18.1 (Android 11) / `hybris-18.1`, aarch64, Sailfish OS 5.1.0.11.
 
-Status: **fixed** by `hybris-patches/system/core/0052-hybris-finalise-linker-config-before-on-init.patch`.
+Status: **fixed** by `hybris-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`.
 Verified on hardware.
 
 ---
@@ -54,13 +54,15 @@ run in the *bootstrap* namespace and see a minimal `/linkerconfig/ld.config.txt`
 init later switches to the *default* namespace, where `/linkerconfig` is re-bound to the
 full, APEX-aware configuration.
 
-hybris compiles that machinery out — see the applied patches in `system/core`:
+hybris compiles that machinery out — see the applied patches in `system/core` (referenced by
+patch number, since the commit hashes change every time `apply-patches.sh` re-applies them):
 
-* `96ee7105b (hybris) Do not SetupMountNamespaces()`
-* `cf0a8880d linkerconfig switch for no updatable apex` (`0051`, elros34) — wraps the
-  namespace logic in `#ifdef DISABLED_FOR_HYBRIS_SUPPORT` and adds `SetupFlattenedApexes()`
-* `cb9ed9254 hybris: fix linkerconfig generation for flattened apexes` (`0001`) — makes
-  `do_update_linker_config()` always regenerate
+* `system/core/0034-hybris-Do-not-SetupMountNamespaces.patch` (upstream mer-hybris)
+* `system/core/0040-hybris-linkerconfig-switch-for-no-updatable-apex.patch` (elros34) — wraps
+  the namespace logic in `#ifdef DISABLED_FOR_HYBRIS_SUPPORT` and adds `SetupFlattenedApexes()`
+* `system/core/0041-hybris-always-regenerate-the-linker-configuration.patch` — makes
+  `do_update_linker_config()` always regenerate, which it otherwise never does because
+  `ro.apex.updatable` is unset on this device
 
 With namespaces gone, the **only** thing that swaps `/linkerconfig` from the bootstrap
 config to the default one is `enter_default_mount_ns` →
@@ -151,7 +153,7 @@ and the composer immediately succeeds.
 
 ## The fix
 
-`hybris-patches/system/core/0052-hybris-finalise-linker-config-before-on-init.patch`
+`hybris-patches/system/core/0042-hybris-finalise-linker-config-before-on-init-starts-.patch`
 adds two commands to the end of `on early-init` in `system/core/rootdir/init.rc`:
 
 ```
@@ -176,6 +178,36 @@ This fixes the whole class of early vendor services, not just `vndservicemanager
 | `vendor.hwcomposer-2-1` starts | 20+ (crash loop) | 1 |
 | `Mixing copies of libbinder` in logcat | hundreds | 0 |
 | `lipstick` | only after manual `killall` | 77s, unaided |
+
+---
+
+## How the fix is delivered
+
+Nothing is edited directly in the Android source tree. The patch lives in
+`Sailfish-on-karatep/hybris-patches`, which is now a strict superset of
+`mer-hybris/hybris-patches` and is pinned over it in `.repo/local_manifests/karatep.xml`, so a
+clean build on any machine is:
+
+```sh
+repo sync
+cd $ANDROID_ROOT
+hybris-patches/apply-patches.sh --mb
+```
+
+Three defects had to be fixed before that actually worked:
+
+* `apply-patches.sh` runs `git am <dir>/*.patch`, so the **glob order is the apply order**. The
+  karatep patches were numbered from `0001`, which both collided with upstream patches and
+  sorted *before* the ones they depend on. They are now `bionic/0009` and
+  `system/core/0040..0042`.
+* The mountpoint patch lived in `hybris-boot/`, but the project path is `hybris/hybris-boot`,
+  so `apply-patches.sh` would have `cd`'d into a non-existent directory.
+* That same patch had no `From:`/`Subject:` header, so `git am` could not parse it at all, and
+  it deleted the 2362 lines describing every other device. It is now a proper git-am patch and
+  purely additive.
+
+Together these meant the tree only ever built because the patches had been applied by hand —
+the exact situation this section exists to prevent.
 
 ---
 
