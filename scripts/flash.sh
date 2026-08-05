@@ -122,6 +122,54 @@ HOST_IP=$(ip -4 -o route get "$DEVICE_IP" 2>/dev/null | sed -n 's/.*[[:space:]]s
     || die "could not determine the host IP facing $DEVICE_IP (try: ip -4 route get $DEVICE_IP)"
 say "Host address on the USB link: $HOST_IP"
 
+# ------------------------------------- make sure we got the PRE-switch_root shell
+#
+# If a Sailfish rootfs is already installed, hybris init finds /target and
+# switch_root's straight into it, even when booted from hybris-recovery.img. You
+# then get the post-switch_root shell on 2323 instead of the installer shell on 23,
+# and /data/.stowaways/sailfishos is busy so nothing can be replaced.
+#
+# hybris-boot's own escape hatch (init-script: "[ -f /target/init_enter_debug ]")
+# is to drop a flag file in the installed rootfs, which makes init halt *before*
+# switch_root. Set it via the 2323 shell, bounce to fastboot and re-boot the
+# recovery, and port 23 appears.
+port_open() { timeout 3 bash -c "echo > /dev/tcp/$DEVICE_IP/$1" 2>/dev/null; }
+
+if ! port_open "$TELNET_PORT"; then
+    if port_open 2323; then
+        warn "Port $TELNET_PORT is closed but 2323 is open: the recovery switch_root'ed into"
+        warn "the existing install. Setting /init_enter_debug so it halts before that."
+        python3 - <<'PYEOF' || die "could not set /init_enter_debug over the 2323 shell"
+import os, socket, time
+s = socket.create_connection((os.environ["DEVICE_IP"], 2323), timeout=15)
+time.sleep(2)
+try:
+    s.recv(65536)
+except Exception:
+    pass
+s.sendall(b"touch /init_enter_debug; sync\n")
+time.sleep(3)
+s.sendall(b"(sleep 2; /system/bin/reboot bootloader || reboot -f) >/dev/null 2>&1 &\n")
+time.sleep(2)
+s.close()
+PYEOF
+        say "Rebooting to fastboot and re-booting the recovery"
+        for _ in $(seq 1 60); do
+            if fastboot devices 2>/dev/null | grep -q .; then break; fi
+            sleep 2
+        done
+        fastboot devices 2>/dev/null | grep -q . || die "device did not return to fastboot"
+        fastboot boot "$RECOVERY_IMG" || die "fastboot boot failed on retry"
+        for _ in $(seq 1 60); do
+            if port_open "$TELNET_PORT"; then break; fi
+            sleep 2
+        done
+    fi
+fi
+port_open "$TELNET_PORT" \
+    || die "no installer shell on $DEVICE_IP:$TELNET_PORT. If 2323 is open the device booted
+       its installed rootfs; see docs/flashing.md."
+
 # ------------------------------------------------------------------ http server
 
 if command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ":$HTTP_PORT "; then
