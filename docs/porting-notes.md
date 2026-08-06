@@ -679,10 +679,129 @@ This is almost certainly downstream of the mis-mapping above — the wrapper rep
 `setActiveGroup` as failed, so removals are never persisted to the store the HAL is holding — but
 that has not been proven yet, and no fix is in the tree.
 
-> Until this is fixed, do not treat the fingerprint list in Settings as the set of fingerprints
-> that can unlock the device. To be sure a fingerprint is gone, clear the store:
-> stop `sailfish-fpd-community`, delete `/data/system/users/100000/fpdata/user.db` and
-> `/var/lib/sailfish-fpd-community/100000/fingerprints.db`, reboot, and enrol again.
+> Fixed; see below. Before the fix the only way to be sure a fingerprint was gone was to clear the
+> store by hand: stop `sailfish-fpd-community`, delete
+> `/data/system/users/100000/fpdata/user.db` and
+> `/var/lib/sailfish-fpd-community/100000/fingerprints.db`, reboot and enrol again.
+
+---
+
+### Root-caused and fixed: the HIDL adapter read a count as an error code
+
+Everything above traces to one line in the HIDL adapter, which is built from
+source in our tree (`hardware/lineage/interfaces/biometrics/fingerprint/2.0/`),
+not shipped as a blob. The LineageOS 2.0 variant exists to adapt an old
+fingerprint-HAL-2.0 vendor library to the 2.1 HIDL interface, and it already
+does the right thing:
+
+```c
+int ret = enumerate(mDevice, results, &n);
+
+if (ret == 0 && mClientCallback != nullptr) {
+    for (uint32_t i = 0; i < n; i++)
+        mClientCallback->onEnumerate(devId, fp.fid, fp.gid, n - i - 1);
+}
+return ErrorFilter(ret);
+```
+
+It calls the synchronous 2.0-style `enumerate()` and **synthesises** the
+`onEnumerate` callbacks — but only when `ret == 0`. FPC's library returns the
+*template count*. With three templates `ret == 3`, so the callbacks were never
+synthesised and `ErrorFilter(3)` fell through to `default:` → `SYS_UNKNOWN`.
+`fpc_set_active_group` answers the same way, and says so plainly:
+
+```
+E fpc_fingerprint_hal: fpc_set_active_group There are 3 fingerprints in userdb 0
+E ...fingerprint@2.0-service: An unknown error returned from fingerprint
+                              vendor library: 3
+```
+
+Because the callbacks never fired, the daemon never learned a single template
+id, so it could only know about templates it had enrolled itself. `remove()`
+then could not be aimed at the right template: the vendor library had nothing to
+delete, reported the operation complete, and the template survived. That is the
+whole story — the "lost" fingerprints, the "already enrolled" enrolment failures
+and the deleted-but-still-unlocking fingers were all the same bug.
+
+Fixed in `Sailfish-on-karatep/android_hardware_lineage_interfaces`, repinned in
+`local_manifests.xml`: treat a positive return as success (`fingerprint.h`
+specifies 0 or a negative errno, so a positive value is a count, not an errno),
+and in `enumerate()` take the smaller of the returned count and `*max_size` so a
+library that ignores the out-parameter cannot make us walk uninitialised
+entries.
+
+Verified on hardware. Before, `GetAll` returned one finger while the sensor held
+three. After:
+
+```
+setActiveGroup to /data/system/users/100000/fpdata
+enumerate_cb(4007450469, remaining 2)
+enumerate_cb(532816712,  remaining 1)
+enumerate_cb(520152970,  remaining 0)
+Loaded finger map: QMap((520152970,"finger1")(532816712,"Unknown 532816712")
+                        (4007450469,"Unknown 4007450469"))
+```
+
+The two orphans surfaced as `Unknown <id>` (upstream's existing handling for
+templates present in the store with no name), which made them removable. After
+removing both, the trustlet and the daemon agree:
+
+```
+fpc_set_active_group There are 1 fingerprints in userdb 0
+fpc_enumerate indices_count 1
+Loaded finger map: QMap((520152970, "finger1"))
+```
+
+### Deploying it: the service lives on the vendor partition
+
+`repo sync --force-sync` is needed once when the project is repinned, because
+its remote changes and repo will not otherwise overwrite the work tree.
+
+Build just the service rather than all of hybris-hal:
+
+```sh
+make android.hardware.biometrics.fingerprint@2.0-service
+```
+
+It then has to reach `/vendor/bin/hw/`, which is a separate read-only partition
+(`mmcblk0p53`) belonging to the LineageOS install, not to our image. That makes
+this the one change in this port that an image build cannot deliver — it must be
+installed onto `/vendor`, and it survives Sailfish reimages precisely because
+`/vendor` is not touched by them.
+
+```sh
+mount -o remount,rw /vendor
+B=/vendor/bin/hw/android.hardware.biometrics.fingerprint@2.0-service
+cp -a "$B" "$B.orig"          # keep the original beside it
+mv "$B" "$B.busy"             # rename: the running binary cannot be overwritten
+cp /path/to/new "$B"          # ("Text file busy" otherwise, and ctl.stop does
+chmod 755 "$B"; chown root:shell "$B"   #  not reliably stop it)
+python3 -c 'import os; os.setxattr("'"$B"'", "security.selinux",
+    b"u:object_r:hal_fingerprint_default_exec:s0\x00")'
+rm -f "$B.busy"
+reboot
+```
+
+`chcon` is not on the device, hence `setxattr`; a fresh `cp` lands as
+`vendor_file` and the exec label has to be restored by hand. SELinux is
+permissive here so it would likely run either way, but relying on that is not
+worth it. The `ro` remount will fail while the old binary is still open — the
+reboot settles it.
+
+### Removals are only reported once confirmed
+
+Two invariants were added to `sailfish-fpd-community` while chasing this, and
+they are worth keeping regardless of the HAL fix:
+
+* a credential is only reported removed once it has been observed to be gone.
+  `onRemoved()` says the HAL considers the operation finished, not that the
+  template left the store. Verification is fail-closed.
+* persisted names are never pruned against an enumeration that did not actually
+  come back, since `saveFingers()` would make the loss permanent.
+
+One gotcha when testing: the lock screen holds a continuous `Identify` session,
+so `Remove` returns `FPREPLY_ALREADY_BUSY` (`int32 3`) and re-arms within seconds
+even after a daemon restart. Unlock the device and keep the screen awake.
 
 ---
 
