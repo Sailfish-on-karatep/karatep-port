@@ -665,6 +665,52 @@ The `XTRA_CA_PATH` correction is worth keeping. `DEBUG_LEVEL` is not.
 > settings service rewrites the file -- so accept the location agreement through Settings rather
 > than editing it, or it will silently revert.
 
+### Satellites are tracked positionally, but no signal is received
+
+Later sessions (after several reboots, with `DEBUG_LEVEL=5` and Qt debug on the provider) do
+produce `$GPGSV`, which earlier ones never did -- so the engine does search. What it reports is
+the important part:
+
+```
+GPGSV,4,1,15,05,66,181,,06,05,039,,11,34,014,,12,77,329,,1*68
+GPGSV,4,2,15,13,11,163,,14,00,000,,15,09,189,,17,00,000,,1*6E
+GPGSV,4,3,15,18,00,000,,19,19,075,,21,71,092,,22,07,142,,1*62
+GPGSV,4,4,15,24,23,222,,25,18,320,,29,00,000,,1*51
+```
+
+Each satellite is `PRN,elevation,azimuth,SNR`. Fifteen satellites in view with plausible geometry
+-- PRN 12 at 77 degrees, PRN 21 at 71, PRN 05 at 66 -- and **every SNR field is empty**. Elevation
+and azimuth are predicted from almanac, so this says the receiver knows exactly where the
+satellites are and hears nothing from any of them. `GPGSA` stays at fix type 1 with no satellites
+used, `GPGGA` at quality 0.
+
+That is the signature of an RF problem rather than a software one: signal is not reaching the
+receiver. Candidates are the GNSS antenna connection, the LNA supply, or modem-side RF
+calibration. Note the recurring `reportSv: At least one RF_LOSS is 0 in gps.conf, please configure
+it` -- RF loss compensation is uncalibrated on this port, though that would skew reported C/No
+rather than blank it entirely, and it would not stop a fix.
+
+### The position mode patch, and why it is not the answer
+
+`geoclue-providers-hybris` picks the mode with
+
+```cpp
+gnssSetPositionMode(m_agpsEnabled ? HYBRIS_GNSS_POSITION_MODE_MS_BASED
+                                  : HYBRIS_GNSS_POSITION_MODE_STANDALONE, ...)
+```
+
+and `m_agpsEnabled` is assigned from `LocationSettings::hybrisEnabled()` -- whether the provider is
+enabled at all -- not from `m_agpsOnlineEnabled`/`hybrisOnlineState()`. So assisted mode is
+requested unconditionally, including when the same process has decided not to send NTP or open the
+SUPL connection. Our fork (`Sailfish-on-karatep/geoclue-providers-hybris`, branch `hybris-18.1`
+off tag `0.3.0`) keys it off `m_agpsOnlineEnabled` instead.
+
+**This is not validated as a fix and should not be described as one.** Standalone could not
+actually be exercised: the requested mode stayed `MSB` even with `hybris\online_enabled=false`
+in `/etc/location/location.conf` at the moment the provider started, so `hybrisOnlineState()` is
+not reading that file the way the patch assumes. It is kept because requesting assisted mode while
+refusing to assist is wrong on any device, not because it changed anything here.
+
 ### Where it stands
 
 The failure is that the modem never powers the GNSS engine, which is below anything userspace
