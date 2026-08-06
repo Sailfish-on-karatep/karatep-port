@@ -346,6 +346,194 @@ particular victim of it is not.
 
 ---
 
+## Audio
+
+Audio was completely silent on every output, and capture returned digital silence. It was three
+independent faults stacked on top of each other, each of which alone is enough to produce total
+silence, and none of which logs an error.
+
+### Everything silent: `module-policy-enforcement` never loaded
+
+`droid-config`'s `sparse/etc/pulse/xpolicy.conf.d/fmradio.conf` was a 21-byte file whose entire
+content was the literal text `fmradio.conf.disabled` — a botched attempt to disable the snippet,
+added as an unrelated drive-by in `2125abf` ("Bluetooth", Sep 2024). The real snippet already
+ships beside it as `fmradio.conf.disabled`, which is how upstream ships it switched off, so
+nothing was ever meant to be at that path.
+
+`module-policy-enforcement` parses `/etc/pulse/xpolicy.conf.d/*.conf` at init. That stray line is
+not valid syntax, `pa__init()` failed, and the module never loaded. There is no error anywhere:
+the only visible trace is a **gap at module index 12** in `pactl list short modules`.
+
+That matters because `arm_droid_default.pa` deliberately ends with:
+
+```
+set-default-sink sink.null
+set-default-source source.null
+```
+
+Moving streams off those is precisely policy enforcement's job. Without it every stream played
+into a null sink and every capture read from a null source — no loudspeaker, no earpiece, no
+3.5 mm, no microphone — while the droid card, the ACDB calibration, the ADSP routing
+(`MM_DL5 -> PRI_MI2S_RX`), the codec DAPM path (`RX2 -> HPHR PA`) and the AW87319 speaker amp were
+all healthy and silent about it.
+
+> If audio is dead but `pactl list sinks` looks perfect, count the module indices.
+
+### Only the loudspeaker worked: this HAL has no `create_audio_patch`
+
+`pa_droid_stream_set_route()` changes an open stream's device with the HAL's
+`create_audio_patch()` unless `DM_OPTION_USE_LEGACY_STREAM_SET_PARAMETERS` is set. karatep's HAL
+does not implement it and returns `-ENOSYS`:
+
+```
+W: droid-util.c: Failed to create output audio patch "primary output"->"Wired Headset" (38)
+W: droid-util.c: Failed to update output stream audio patch (38)
+```
+
+Every routing change *after* stream open therefore failed, and the stream stayed on whatever
+device it was opened with. Streams open on the speaker — which is exactly why the loudspeaker was
+the one output that ever worked. With a headset plugged in, PulseAudio moved its own port and the
+kernel switch reported the jack, but the HAL was never told and kept `snd_device(2: speaker)`.
+That was the long-standing "3.5 mm: jack detected, not routed" entry.
+
+Fixed with `use_legacy_stream_set_parameters=true` in `sparse/etc/pulse/arm_droid_card_custom.pa`,
+which falls back to `set_parameters("routing=...")` — which this HAL does implement.
+
+### No microphone: the vendor policy config omits the built-in mics
+
+`/vendor/etc/audio_policy_configuration.xml` routes `Built-In Mic` only to the `record_24` and
+`voip_tx` mix ports. The route whose sink is `primary input` lists only Wired Headset Mic, BT SCO
+Headset Mic, FM Tuner and Telephony Rx.
+
+Android copes, because AudioPolicyManager may serve `AUDIO_SOURCE_MIC` from any mix port that
+fits. `pulseaudio-modules-droid` may not: it builds `source.primary_input` from the primary input
+mix port alone. So the source came up with **no `input-builtin_mic` port at all** and PulseAudio
+selected the highest-priority available one instead — `input-voice_call`, at priority 200 because
+Telephony Rx is in `attachedDevices`. Every capture then reached the HAL as
+`source(4)=VOICE_CALL`, which it rejected:
+
+```
+E voice: voice_check_and_set_incall_rec_usecase: As voice call is not active,
+         Incall rec usecase can't be selected for requested source:4
+D audio_hw_primary: start_input_stream: exit: status(-22)
+```
+
+retried about every 100 ms for as long as the stream was open. No capture PCM was ever opened and
+every recording was digital silence, while PulseAudio reported the source as `RUNNING`.
+
+Fixed by pointing `module-droid-card` at our own copy of the config with the `config=` modarg
+(`/etc/pulse/droid/audio_policy_configuration.xml`), which differs from the vendor file in that
+one route and nothing else. `/vendor` is left untouched and the override is scoped to PulseAudio.
+
+### Microphone topology
+
+Two internal analog mics plus the headset mic, all on one PulseAudio source with selectable ports:
+
+| PulseAudio port | HAL snd_device | mixer path | Codec input |
+|---|---|---|---|
+| `input-builtin_mic` | `68: handset-mic` | `adc1` | AMIC1 (primary, bottom) |
+| `input-back_mic` | `77: speaker-mic` | `adc3` | AMIC3 (secondary) |
+| `input-wired_headset` | `85: headset-mic` | `adc2` | AMIC2 (3.5 mm) |
+
+A 2-channel capture from the built-in mic selects `115: handset-stereo-dmic-ef` and returns two
+genuinely independent signals (high-frequency L/R correlation 0.05; one mic duplicated into both
+channels would correlate ~1.0).
+
+### Fluence dual-mic noise suppression
+
+`ro.vendor.audio.sdk.fluencetype=fluence` already advertises `FLUENCE_DUAL_MIC`, but the vendor
+ships every `persist` switch off, so capture ran single-mic and the second mic was unused.
+
+**Read the property names off the shipped binary, not off `hardware/qcom/audio` in the tree** —
+they are not the same code. The tree's `hal/msm8916/platform.c` reads unprefixed
+`persist.audio.fluence.*` and has no `audiorec` switch at all, while
+`/vendor/lib64/hw/audio.primary.msm8937.so` contains `persist.vendor.audio.fluence.{audiorec,
+hfpcall,mode,speaker,voicecall,voicerec}`. The vendor-prefixed names are the ones that take
+effect, and `.audiorec` covers ordinary `AUDIO_SOURCE_MIC` recording — all PulseAudio ever asks
+for.
+
+Measured, 8 s of speech over deliberate background noise, same conditions, only `.audiorec`
+changed:
+
+| | snd_device | speech | noise floor | SNR |
+|---|---|---|---|---|
+| off | `68: handset-mic` | -27.7 dBFS | -42.4 dBFS | 14.7 dB |
+| on | `73: dmic-endfire` | **-25.8 dBFS** | **-61.8 dBFS** | **36.0 dB** |
+
+Speech came out 1.9 dB *louder* while the floor fell 19.4 dB, which rules out the obvious
+alternative explanation — that the quieter capture seen in a silent room was simply less gain.
+
+Enabled in `sparse/usr/libexec/droid-hybris/system/etc/init/fluence.rc`. The trigger must be
+`post-fs-data`, not `post-fs`: init loads persistent properties from `/data` during
+`post-fs-data`, and a `persist.*` property set before that is overwritten by the stored value.
+`.voicecall` and `.speaker` are deliberately left alone — they change in-call and speakerphone
+routing, untestable with only a dummy SIM.
+
+### The earpiece needs no call to test
+
+`connected_port()` in `droid-util.c` hardcodes `output-earpiece` to `PA_AVAILABLE_NO`, and the
+`xpolicy.conf.d/earpiece.conf` rules only fire on call/VoIP device types, so it looks untestable.
+It is not — forcing the port works once routing changes actually reach the HAL (see
+`create_audio_patch` above):
+
+```sh
+pactl set-sink-port sink.primary_output output-parking
+pactl set-sink-port sink.primary_output output-earpiece
+```
+
+The HAL then moves to `snd_device(1: handset)` and the codec brings up `EAR / EAR PA / EAR_S /
+EAR CP` with `Ext Spk` off. The `output-parking` step is not optional: the droid HAL applies a
+mode change on the *next* routing change, and setting an already-active port is a no-op.
+
+### Headset detected as headphone: the TS3A227E never ran a detection
+
+The 3/4-pole decision on this board belongs to a TI **TS3A227E** accessory-detection chip on
+`i2c_2` — `wcd-mbhc-v2`'s own cross-connection check is compiled out under
+`CONFIG_SND_SOC_TS3A227E`. Its detection always timed out, so every 4-pole headset was classified
+as a 3-pole headphone, the mic line was never enabled, and inline buttons never registered:
+
+```
+ts3a227e_auto_detect time out
+wcd_correct_swch_plug: Valid plug found, plug type headphone
+wcd_mbhc_btn_press_handler: Plug isn't headset, ignore button press
+```
+
+Capturing from the headset mic gave only the AMIC2 noise floor, about -68 dBFS, against roughly
+-31 dBFS on both internal mics.
+
+The cause is an inherited LineageOS regression, `8d2f38f67c27` ("ASoC: ts3a227e: Fix misleading
+indentation", Jul 2021). It silenced `-Wmisleading-indentation` by adding braces around the wrong
+statements, leaving `reinit_completion()` and the `DET_TRIGGER` register write unreachable after
+`return -1` inside the null-guard:
+
+```c
+if (!ts3a_chip) {
+    return -1;
+    reinit_completion(&ts3a_chip->detect_compl);
+    ts3a227e_update_bits(..., DET_TRIGGER, DET_TRIGGER);
+}
+rc = wait_for_completion_timeout(...);
+```
+
+So the chip was never told to detect anything and the driver then waited for a completion
+interrupt that could not arrive. `/proc/interrupts` confirmed it — `msmgpio 25 TS3A227E`
+registered, never fired, across the whole uptime. `karate_hp_switch_set()` was damaged the same
+way. Fixed in our kernel fork; verified on hardware:
+
+| | before | after |
+|---|---|---|
+| TS3A227E IRQ count | `0` | `1` on insertion |
+| chip detection | `auto_detect time out` | `Detction Results: 0xc` |
+| MBHC verdict | `plug type headphone` | `new_plug(headset)` |
+| PulseAudio port | stayed `input-builtin_mic` | `input-wired_headset` |
+| capture level | -68.2 dBFS (noise floor) | -56.0 dBFS |
+
+> This almost certainly breaks the headset mic on stock LineageOS 18.1 for karate/karatep too.
+> Searching the `#sailfishos-porters` archive for `"Plug isn't headset"` and
+> `"wcd_correct_swch_plug"` returns **zero hits** in eleven years — no prior art at all.
+
+---
+
 ## Fingerprint (FPC 1020)
 
 The kernel driver and the vendor HIDL `android.hardware.biometrics.fingerprint@2.1` HAL were both
@@ -709,7 +897,6 @@ done | sort -u
 * Failed systemd units: `droid-bootctl.service`, `systemd-tmpfiles-setup.service`,
   `wlan-module-load.service`. (`dev-binderfs.mount` also fails, but that is expected — binderfs
   is Linux 5.0+ and this kernel is 3.18; the legacy `/dev/{,hw,vnd}binder` nodes are correct.)
-* 3.5 mm audio routing — jack is detected, audio is not routed.
 * Mobile data does not work; SIM slot 2 reports "Network: Denied".
 * Cameras and RIL are flaky.
 

@@ -15,13 +15,16 @@ Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on t
 
 ### Currently working on
 
-Loudspeaker, camera video-mode crash, power management, and the unclean shutdown. Mobile data,
-calls/SMS and SIM 2 are parked until a real SIM is available.
+Fingerprint enrolment (`setActiveGroup` fails with `SYS_UNKNOWN` from a cold boot), camera
+video-mode crash, power management, and the unclean shutdown. Mobile data, calls/SMS and SIM 2
+are parked until a real SIM is available.
 
 ### Recently fixed
 
 | | |
 |---|---|
+| **No audio at all, on any output, plus no microphone** | Three independent faults stacked. A 21-byte `xpolicy.conf.d/fmradio.conf` stub broke `module-policy-enforcement`, so with `arm_droid_default.pa` defaulting to `sink.null`/`source.null` nothing was ever routed off them. This HAL has no `create_audio_patch`, so routing changes after stream open failed with `-ENOSYS` and streams stayed on the device they opened with — which is why only the loudspeaker ever worked. And the vendor policy config omits the built-in mics from the `primary input` route, so capture was opened as `AUDIO_SOURCE_VOICE_CALL` and refused. Loudspeaker, earpiece, 3.5 mm and all mics verified on hardware; Fluence dual-mic noise suppression enabled (+21 dB SNR, measured). → [details](docs/porting-notes.md#audio) |
+| **Headset mic dead; 4-pole headsets seen as 3-pole** | The TS3A227E accessory-detection chip never ran a detection, so MBHC classified every headset as a headphone. An inherited LineageOS regression (`8d2f38f67c27`) had braced `-Wmisleading-indentation` around the wrong statements, leaving the `DET_TRIGGER` write unreachable after a `return`. → [details](docs/porting-notes.md#headset-detected-as-headphone-the-ts3a227e-never-ran-a-detection) |
 | **No UI until `killall vndservicemanager`** | Early vendor services linked the system copy of `libbinder` (`SYST`) instead of the VNDK copy (`VNDR`), so every `/dev/vndbinder` lookup was rejected and the graphics composer crash-looped. Verified on hardware: composer starts once, no `Parcel` errors, lipstick comes up unaided. → [full analysis](docs/rca/vndservicemanager-libbinder.md) |
 | **WLAN did not come up** | Two independent causes: `wlan.ko` must match the running kernel exactly (so droid-hal has to be rebuilt after *any* kernel change), and it must be loaded early by `wlan-module-load.service` — a late `modprobe` always returns `ENODEV`. → [details](docs/porting-notes.md#wlan) |
 | **Build died on `external/chromium-webview`** | LineageOS' manifest links a file that no longer exists upstream, leaving a dangling symlink. The project is now dropped in [`manifests/local_manifests.xml`](manifests/local_manifests.xml). |
@@ -30,7 +33,7 @@ calls/SMS and SIM 2 are parked until a real SIM is available.
 ### Hardware
 
 > ⚠️ **This table is stale and must not be relied on.** Hands-on testing has shown entries that
-> are simply wrong in both directions — the loudspeaker was marked working and does not work. Treat
+> are simply wrong in both directions. Treat
 > every row below as *unverified*, including the ✅ ones, until it is re-tested. It is being replaced
 > by an evidence-based `docs/feature-matrix.md`, where each status is backed by a log line, a config
 > line, or a hands-on result.
@@ -46,10 +49,13 @@ calls/SMS and SIM 2 are parked until a real SIM is available.
 | Graphics / UI | ✅ | `hwcomposer-2-1` + lipstick |
 | Cameras (front & rear) | ⚠️ | work, but flaky |
 | Camera flash | ❓ | untested |
-| Audio — loudspeaker | ✅ | |
-| Audio — 3.5 mm | ❌ | jack detected, not routed |
-| Audio — earpiece | ❓ | untested |
+| Audio — loudspeaker | ✅ | verified on hardware |
+| Audio — 3.5 mm | ✅ | verified, both channels; needs `use_legacy_stream_set_parameters` |
+| Audio — earpiece | ✅ | verified; no call needed, force `output-earpiece` via `output-parking` |
 | Audio — Bluetooth | ✅ | A2DP verified by hand |
+| Mic — built-in (AMIC1) | ✅ | `68: handset-mic` |
+| Mic — secondary (AMIC3) | ✅ | `77: speaker-mic`; dual-mic Fluence enabled |
+| Mic — headset (AMIC2) | ✅ | `85: headset-mic`, after the TS3A227E kernel fix |
 | Bluetooth | ✅ | pairing + A2DP verified. The old "controller init failed" reading was wrong — the HAL logs `Init succeded`; the 61 s cycle was `bluebinder` racing WLAN for the shared WCNSS SoC. Fixed by `Type=oneshot` on `wlan-module-load.service` plus an ordering drop-in; `bluebinder` no longer masked, `NRestarts=0` |
 | WLAN | ✅ | `wlan0` up at boot with the device's real MAC, associates, holds an IP and reaches the internet. **2.4 GHz only — hardware limit**, not a config gap. DNS needed a fix of its own: paranoid networking denied systemd-resolved (uid 997) any socket → [details](docs/porting-notes.md#associated-ip-address-gateway-reachable--and-every-name-lookup-fails) |
 | WLAN — WPA3 | ⚠️ | WPA3-**transition** APs work (WPA2-PSK + PMF) after the prima `MFPEnabled` fix. WPA3-**only** cannot work: SAE needs `NL80211_CMD_EXTERNAL_AUTH` (Linux 4.17), absent on 3.18 → [details](docs/porting-notes.md#wpa3-transition-aps-ctrl-event-assoc-reject-status_code1) |
