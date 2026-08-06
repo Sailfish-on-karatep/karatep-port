@@ -534,6 +534,136 @@ way. Fixed in our kernel fork; verified on hardware:
 
 ---
 
+## GPS (does not acquire)
+
+The whole software chain works and a positioning session genuinely reaches the hardware. What
+does not happen is acquisition: the receiver **never reports a single satellite in view**, with a
+clear sky, over sessions lasting minutes.
+
+### First: you cannot test this with `dbus-send`
+
+`geoclue-hybris` is D-Bus activated and exits when idle, and geoclue's reference count is tied to
+the calling connection's unique name. A one-shot tool drops the reference the instant it exits, so
+every `GetPosition` spawns a fresh provider that asks for a fix and dies before the engine can
+start. Polling in a loop makes it worse, not better: it just churns the client.
+
+That produced a 30 s vote/unvote cycle in the HAL log that looks like a GNSS problem and is not —
+it is client churn. Hours went into chasing it.
+
+A session only stays up if something **holds the D-Bus connection open**. `csd` does (dial
+`*#*#310#*#*`, GPS test), or use a client that connects, calls
+`org.freedesktop.Geoclue.AddReference`, and then simply sleeps without closing the socket.
+
+### Getting the logs that matter
+
+Three separate switches, none of which is obvious:
+
+* **The QCOM loc stack** honours `DEBUG_LEVEL` in `/vendor/etc/gps.conf`, and its own comment says
+  that overrides Android's log levels. It ships at `2` (warnings and errors), which hides all
+  satellite and session detail. `persist.vendor.sys.gps.loglevel` does **not** override it — that
+  was tried and made no difference. Raise `DEBUG_LEVEL` to 4 or 5 and reboot; the log goes from
+  ~2 lines per session to several hundred.
+* **NMEA** only appears with Qt debug logging on the provider:
+
+  ```sh
+  mkdir -p /etc/systemd/user/geoclue-providers-hybris.service.d
+  printf '[Service]\nEnvironment=QT_LOGGING_RULES=*.debug=true\n' \
+      > /etc/systemd/user/geoclue-providers-hybris.service.d/debug.conf
+  systemctl --user daemon-reload    # as the device user
+  ```
+
+* **journald retention here is minutes**, so capture while the session runs, not afterwards.
+
+### What works
+
+* `geoclue-provider-hybris-binder` is the right provider for this Android 11 base, and it
+  initialises all four interfaces without error: GNSS, AGNSS, AGNSS RIL, GNSS Debug.
+* A held session really starts. `mInSession: 1`, and the QMI trace at session start is exactly
+  what it should be:
+
+  ```
+  1   QMI_LOC_START_REQ_V02
+  2   QMI_LOC_SET_OPERATION_MODE_REQ_V02
+  1   QMI_LOC_REG_EVENTS_REQ_V02
+  48  QMI_LOC_EVENT_POSITION_REPORT_IND_V02
+  ```
+
+* NMEA flows at 1 Hz.
+* The modem subsystem is healthy (`rmt_storage` writing `modem_fs1`/`modem_fs2`, no ramdumps).
+
+### What does not work, precisely
+
+The NMEA is empty and, decisively, **there is never a `$GPGSV` sentence**:
+
+```
+$GPGSA,A,1,,,,,,,,,,,,,,,,*32     fix type 1 = no fix, no satellites
+$GPGGA,,,,,,0,,,,,,,,*66          fix quality 0
+$GPRMC,,V,,,,,,,,,,N,V*29         V = void
+```
+
+GSV reports satellites *in view*. A receiver that is searching emits it within seconds, fix or no
+fix, assistance or none. Its total absence means the engine is not searching at all — which the
+QMI layer confirms:
+
+* `mEngineOn: 0` throughout the session; `QMI_LOC_EVENT_ENGINE_STATE_IND` (ENGINE_ON) never
+  arrives.
+* No `QMI_LOC_EVENT_GNSS_SV_INFO_IND_V02`, ever.
+
+The only positions reported are coarse and non-satellite:
+
+```
+flags: 1075   source: 2   latitude: 10.989997   longitude: 78.334102
+uncertainty: 5000000   SV used in fix (gps/glo/bds/gal/qzss): (0x0/0x0/0x0/0x0/0x0/0x0)
+```
+
+roughly 150 km out, zero SVs -- a network/cell seed, not a fix.
+
+### Assistance is also broken, but is not the cause
+
+Worth recording because it is real, and worth fixing once acquisition works:
+
+* The provider requests **MS-Based** mode (`gnssSetPositionMode (1 0 1000 ...)` ->
+  `operationMode MSB`). The modem then asks for assistance -- `QMI_LOC_EVENT_INJECT_TIME_REQ_IND_V02`,
+  `QMI_LOC_EVENT_WIFI_REQ_IND_V02` -- and nothing answers.
+* `geoclue-hybris` gates that on the online aGPS setting; the binary contains
+  *"Online aGPS not enabled, not sending NTP request."* and *"...not starting data connection."*
+  `hybris\online_enabled` was `false` in `/etc/location/location.conf`.
+* It also needs ofono's **default data modem** for the SUPL connection, which this device does not
+  have (dummy SIM, mobile data broken).
+* **XTRA never downloads.** Only an empty `xtra.sqlite`, no `lto2.dat`, although the server is
+  reachable from the device (`curl http://gllto.glpals.com/.../lto2.dat` returns 180 KB).
+  `XTRA_CA_PATH` in `/vendor/etc/gps.conf` pointed at `/usr/lib/ssl-1.1/certs`, which does not
+  exist; `/etc/ssl/certs` does.
+* `reportSv: At least one RF_LOSS is 0 in gps.conf, please configure it` -- RF loss compensation
+  is uncalibrated for this device.
+
+None of this explains zero satellites *in view*, which happens before assistance is relevant. It
+would explain a slow or absent *fix*, not an engine that never searches.
+
+### Fixed along the way
+
+The QCOM loc stack looks for its configuration in `/etc` as well as `/vendor/etc` -- the same
+place on Android, not on a Sailfish rootfs. All six were missing: `gps.conf`, `izat.conf`,
+`lowi.conf`, `sap.conf`, `xtwifi.conf`, `flp.conf`. Now symlinked from droid-config's
+`sparse/etc/`. Long-standing advice from mal on `#sailfishos-porters` (2016-07-08, 2016-09-15,
+2019-06-27). It did **not** fix acquisition.
+
+### Where it stands
+
+The failure is that the modem never powers the GNSS engine, which is below anything userspace
+configures. Remaining suspects are modem-side GNSS enablement (NV/calibration) and the RF path.
+
+The next experiment is to force `GNSS_POSITION_MODE_STANDALONE` -- a fork of
+`geoclue-providers-hybris` -- which removes assistance from the question entirely. If GSV is still
+absent in standalone under a clear sky, the conclusion is hardware or modem-side rather than
+anything the port can configure.
+
+> Two false trails, recorded so they are not walked again: the 30 s session cycle is client churn,
+> not GNSS behaviour; and `LocSvc_GnssInterface: serviceDied` is the HAL reporting that *its
+> client* disconnected, not the GNSS service crashing.
+
+---
+
 ## Fingerprint (FPC 1020)
 
 The kernel driver and the vendor HIDL `android.hardware.biometrics.fingerprint@2.1` HAL were both
