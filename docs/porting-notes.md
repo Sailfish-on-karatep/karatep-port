@@ -572,12 +572,92 @@ local edit:
 | | |
 |---|---|
 | Fork | `Sailfish-on-karatep/sailfish-fpd-community`, branch `hybris-18.1` |
-| Commit | `6c22a6f` — *Do not hang forever when the HAL never answers enumerate()* |
+| Commits | `6c22a6f` — *Do not hang forever when the HAL never answers enumerate()*<br>`9c85dd7` — *Survive a HAL that fails enumerate() when templates exist* |
 | Consumed at | `$ANDROID_ROOT/hybris/mw/sailfish-fpd-community` (`origin` = the fork, `upstream` = sailfishos-open) |
 
 `hybris/mw` is not `repo`-managed, so there is no `local_manifests` line to repin — the clone
 itself must come from the fork. Rebuild with
 `rpm/dhd/helpers/build_packages.sh -m=sailfish-fpd-community`.
+
+---
+
+### Enrolled fingerprints vanish after a reboot, and re-enrolment fails
+
+Both symptoms come from one HAL quirk: **karatep's FPC HAL fails `enumerate()` precisely when
+there is something to enumerate.** The vendor library returns the template *count* and the HIDL
+service treats any non-zero return as an error:
+
+```
+fpc_fingerprint_hal: fpc_enumerate
+fpc_tac : fpc_tac_get_template_id_from_index begin/end   (x2)
+fpc_fingerprint_hal: fpc_enumerate indices_count 2
+...fingerprint@2.0-service: An unknown error returned from fingerprint vendor library: 2
+```
+
+which reaches the daemon as `u_hardware_biometry_enumerate()` returning `SYS_UNKNOWN`. This is the
+same quirk seen from the other side above: with **no** templates the vendor library returns 0, the
+service accepts it, and then nothing follows — hence the silent enumerate. With templates present
+it returns the count and the call fails outright.
+
+`setActiveGroup()` fails the same way, which is the first thing visible in the journal:
+
+```
+AndroidFP::setGroup(0, "/data/system/users/100000/fpdata")
+setActiveGroup failed:  SYS_UNKNOWN
+FPDCommunity::enumerate()  ->  slot_failed "SYS_UNKNOWN"
+```
+
+Two consequences, which together look exactly like "my fingerprints were lost":
+
+* `enumerate()` bailed on the error without emitting `enumerated()`, so `FPDCommunity` never
+  reached `loadFingers()` and `m_fingerMap` stayed empty. `GetAll` returned an empty array and the
+  UI showed nothing enrolled.
+* Believing nothing was enrolled, the user re-enrols the same finger — and the TEE, which still
+  holds it, refuses:
+
+  ```
+  fpc_tac : fpc_tac_send_enrol_cmd failed with retval: 13
+  fpc_fingerprint_hal: do_enroll finger already enrolled
+  onError(8)  ->  fpd "ERROR_VENDOR: 1"
+  ```
+
+  so the fingerprint can be neither enrolled nor removed from the UI.
+
+**Nothing is actually lost.** Check before assuming otherwise:
+
+```sh
+ls -l /data/system/users/100000/fpdata/user.db          # the templates, ~288 KB
+od -c /var/lib/sailfish-fpd-community/100000/fingerprints.db  # the id -> name map
+dbus-send --system --print-reply --dest=org.sailfishos.fingerprint1 \
+    /org/sailfishos/fingerprint1 org.sailfishos.fingerprint1.GetAll
+```
+
+If `user.db` and `fingerprints.db` have content but `GetAll` is empty, this is the bug.
+
+Fixed in the fork (`9c85dd7`): finish the enumeration round even when the call fails, and track
+whether the list genuinely came back from the HAL. `loadFingers()` only reconciles the persisted
+map against the HAL when that list is real; otherwise the stored fingers are kept as-is.
+
+> That reconcile is the dangerous part. It prunes every finger not in the enumerated list and then
+> `saveFingers()` writes the result back, so one failed enumeration would erase the names from disk
+> permanently while the templates stayed in the trustlet.
+
+### Do not restart `vendor.fps_hal`
+
+It does not reload its trustlet. After `setprop ctl.restart vendor.fps_hal` every secure command
+fails and the kernel says:
+
+```
+QSEECOM: __qseecom_send_cmd: app_id 5 (fpctzappfingerprint) is not found
+QSEECOM: qseecom_ioctl: failed qseecom_send_cmd: -2
+```
+
+Only a reboot restores it. Restarting `sailfish-fpd-community` alone is safe and is enough to pick
+up daemon-side changes.
+
+> Debugging any of this is hampered by journald's tiny retention on this device — `Logs begin at`
+> is routinely only a couple of minutes back, so the boot-time fpd log is gone before you look.
+> Raise it before investigating.
 
 ---
 

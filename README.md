@@ -15,14 +15,14 @@ Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on t
 
 ### Currently working on
 
-Fingerprint enrolment (`setActiveGroup` fails with `SYS_UNKNOWN` from a cold boot), camera
-video-mode crash, power management, and the unclean shutdown. Mobile data, calls/SMS and SIM 2
-are parked until a real SIM is available.
+Camera video-mode crash, power management, and the unclean shutdown. Mobile data, calls/SMS and
+SIM 2 are parked until a real SIM is available.
 
 ### Recently fixed
 
 | | |
 |---|---|
+| **Enrolled fingerprints "lost" after a reboot; re-enrolment errors out** | karatep's FPC HAL fails `enumerate()` precisely when templates exist — the vendor library returns the count and the HIDL service treats non-zero as an error. The daemon therefore never loaded its finger map and reported nothing enrolled, while the TEE still held the templates, so re-enrolling the same finger was refused with `do_enroll finger already enrolled`. Nothing was ever lost. Fixed in the `sailfish-fpd-community` fork; `GetAll` returns both fingers again. → [details](docs/porting-notes.md#enrolled-fingerprints-vanish-after-a-reboot-and-re-enrolment-fails) |
 | **No audio at all, on any output, plus no microphone** | Three independent faults stacked. A 21-byte `xpolicy.conf.d/fmradio.conf` stub broke `module-policy-enforcement`, so with `arm_droid_default.pa` defaulting to `sink.null`/`source.null` nothing was ever routed off them. This HAL has no `create_audio_patch`, so routing changes after stream open failed with `-ENOSYS` and streams stayed on the device they opened with — which is why only the loudspeaker ever worked. And the vendor policy config omits the built-in mics from the `primary input` route, so capture was opened as `AUDIO_SOURCE_VOICE_CALL` and refused. Loudspeaker, earpiece, 3.5 mm and all mics verified on hardware; Fluence dual-mic noise suppression enabled (+21 dB SNR, measured). → [details](docs/porting-notes.md#audio) |
 | **Headset mic dead; 4-pole headsets seen as 3-pole** | The TS3A227E accessory-detection chip never ran a detection, so MBHC classified every headset as a headphone. An inherited LineageOS regression (`8d2f38f67c27`) had braced `-Wmisleading-indentation` around the wrong statements, leaving the `DET_TRIGGER` write unreachable after a `return`. → [details](docs/porting-notes.md#headset-detected-as-headphone-the-ts3a227e-never-ran-a-detection) |
 | **No UI until `killall vndservicemanager`** | Early vendor services linked the system copy of `libbinder` (`SYST`) instead of the VNDK copy (`VNDR`), so every `/dev/vndbinder` lookup was rejected and the graphics composer crash-looped. Verified on hardware: composer starts once, no `Parcel` errors, lipstick comes up unaided. → [full analysis](docs/rca/vndservicemanager-libbinder.md) |
@@ -67,7 +67,7 @@ are parked until a real SIM is available.
 | VoLTE | ➖ | needs Jolla proprietary bits |
 | GPS | ❓ | untested |
 | Sensors | ⚠️ | rotation works; individual sensors unverified |
-| Fingerprint (FPC 1020) | ✅ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled" → [details](docs/porting-notes.md#fingerprint-fpc-1020) |
+| Fingerprint (FPC 1020) | ⚠️ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled". The same HAL quirk from the other side — `enumerate()` fails outright once templates *do* exist — made enrolled fingerprints appear lost after a reboot and blocked re-enrolment; also fixed in the fork. **Unlock is unverified since that fix.** → [details](docs/porting-notes.md#fingerprint-fpc-1020) |
 | Vibration | ✅ | |
 | Notification LED | ⚠️ | lights up, behaviour unverified |
 | Keys — power, volume | ✅ | |
