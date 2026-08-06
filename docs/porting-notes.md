@@ -648,6 +648,23 @@ place on Android, not on a Sailfish rootfs. All six were missing: `gps.conf`, `i
 `sparse/etc/`. Long-standing advice from mal on `#sailfishos-porters` (2016-07-08, 2016-09-15,
 2019-06-27). It did **not** fix acquisition.
 
+### Local `/vendor/etc/gps.conf` changes on the test device
+
+`/vendor` is the LineageOS partition and nothing in the image build touches it, so these are
+device-local and must be re-applied by hand (or reverted) deliberately. `gps.conf.orig` sits
+beside the file as the untouched original.
+
+| Setting | Stock | Now | Why |
+|---|---|---|---|
+| `DEBUG_LEVEL` | `2` | `5` | diagnostic only; **turn this back down** once GPS is settled, it is very noisy |
+| `XTRA_CA_PATH` | `/usr/lib/ssl-1.1/certs` | `/etc/ssl/certs` | the stock path does not exist on this device; this one does |
+
+The `XTRA_CA_PATH` correction is worth keeping. `DEBUG_LEVEL` is not.
+
+> `/etc/location/location.conf` also resets `agreement_accepted` back to `false` on its own -- the
+> settings service rewrites the file -- so accept the location agreement through Settings rather
+> than editing it, or it will silently revert.
+
 ### Where it stands
 
 The failure is that the modem never powers the GNSS engine, which is below anything userspace
@@ -707,7 +724,9 @@ local edit:
 
 `hybris/mw` is not `repo`-managed, so there is no `local_manifests` line to repin — the clone
 itself must come from the fork. Rebuild with
-`rpm/dhd/helpers/build_packages.sh -m=sailfish-fpd-community`.
+`rpm/dhd/helpers/build_packages.sh -m sailfish-fpd-community` -- the repo is a **separate
+argument**, not `-m=REPO`. The `=` form is parsed as part of the name and the helper tries to
+clone `https://github.com/mer-hybris/=sailfish-fpd-community.git`, which fails confusingly.
 
 ---
 
