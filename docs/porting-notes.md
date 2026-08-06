@@ -258,13 +258,13 @@ proxy should not gate the display.
 
 ---
 
-## Boot splash (not possible with `HYBRIS_BOOTLOGO`)
+## Boot splash (needs a helper; `HYBRIS_BOOTLOGO`'s own mechanism cannot work)
 
 Between the Lenovo bootloader logo and lipstick the screen is black for ~75 s, which reads as a
 hang. The obvious fix — hybris-boot's `HYBRIS_BOOTLOGO`, which makes the initrd run
-`zcat /bootsplash.gz > /dev/fb0` — **cannot work on this device**. It is disabled in
-[`hybris-boot/Android.mk`](https://github.com/Sailfish-on-karatep/hybris-boot), where the same
-explanation is kept inline.
+`zcat /bootsplash.gz > /dev/fb0` — **cannot work on this device**. The diagnosis is below; the
+implemented replacement is [`hybris-boot/fbsplash.c`](https://github.com/Sailfish-on-karatep/hybris-boot),
+where the same explanation is kept inline next to the code.
 
 **No upstream guidance exists.** The [HADK](https://hadk.sailfishos.org/) (all chapters),
 [`hadk-faq`](https://github.com/mer-hybris/hadk-faq) and
@@ -273,6 +273,27 @@ boot splash, boot logo, `HYBRIS_BOOTLOGO` or `/dev/fb0`. HADK Hot's single menti
 `bootanimation` — `ANDROID_ROOT="/system" /system/bin/bootanimation` — is a *graphics-stack test
 binary* listed beside `surfaceflinger` for use after `systemctl mask user@100000`. It is not a
 splash mechanism. Do not go looking again.
+
+Nor is there community guidance. The
+[`#sailfishos-porters` archive](https://piggz.co.uk/sailfishos-porters-archive/) — greppable, and
+the right first stop for anything like this — has **no hit at all** for `FBIOPAN` or `cont_splash`
+in eleven years of logs, and what it does say about the splash is uniformly negative:
+
+| | |
+|---|---|
+| `2015-02-13` sledges | *"nope, bootsplash was never implemented"* |
+| `2016-04-01` alterego | *"there's no bootsplash for HADK port, so the framebuffer may get stuck until something clears it, or it may go black for a bit whilst Sailfish starts"* |
+| `2019-04-12` r0kk3rz | *"there isnt a sailfish bootsplash"* — in reply to someone who had found `bootsplash()` in the init script and assumed it worked |
+| `2018-01-25` lSDriim | *"I enabled bootlogo and when I tried do `zcat /bootsplash.gz > /dev/fb0` manualy it never returns"* |
+| `2017-12-26` r0kk3rz | *"apparently the bootsplash was causing my device to hang at boot"* |
+| `2014-08-12` energycsdx | *"bootlogo is disabled by default in hybris-boot"* |
+
+So `HYBRIS_BOOTLOGO` is a vestigial feature that nobody has working, and on other devices it has
+**hung the boot** rather than merely failing. That is why `fbsplash` forks into the background
+before it touches the framebuffer and gives up on the first error: on this code path a cosmetic
+splash must never be able to cost boot time, let alone block it. (Related, and worth remembering
+if display power ever misbehaves after a splash: `2014-08-15` spiiroin, on a backlight bug —
+*"current guess is: the boot logo leaves kernel side in some 'bootlogo mode'"*.)
 
 **Why the write fails.** `/init.log` shows `zcat: write error: No such device` (ENODEV) on every
 attempt. mdss defines no `.fb_write`, so generic `fb_write()` from `fbmem.c` runs, and it returns
@@ -322,15 +343,106 @@ mdss_mdp.panel=1:dsi:0:qcom,mdss_dsi_nt35596_tm_1080p_video:1:none:cfg:single_ds
                                                             ^ cont_splash_enabled
 ```
 
-A `memcpy` into `smem` is never scanned out. A working splash therefore needs a small initramfs
-helper doing `open` → `mmap` → `memcpy` → `FBIOPAN_DISPLAY`, not a shell redirect.
-`initramfs/bootsplash.gz` and [`scripts/make-bootsplash.py`](../scripts/make-bootsplash.py) are
-kept for whoever writes it.
+A `memcpy` into `smem` is never scanned out.
+
+**Third blocker, found while writing the helper: closing the fd undoes the splash.**
+`mdss_fb_release_all()` (`mdss_fb.c:3004`) runs on the *last* close of `/dev/fb0`, and at
+refcount zero it does `mdss_fb_set_backlight(mfd, 0)` (`:3075`),
+`mdss_fb_blank_sub(FB_BLANK_POWERDOWN, …)` (`:3077`) and `mdss_fb_free_fb_ion_memory()` (`:3085`)
+— backlight off, panel off, buffer freed. A helper that exits after committing would show the
+image for a few milliseconds and then go dark, which looks exactly like the bug being fixed.
+
+### The fix: `fbsplash`
+
+`hybris-boot/fbsplash.c` — a 4.4 KB **freestanding** aarch64 binary staged into the initramfs
+beside busybox (`$(PRODUCT_OUT)/utilities/`, copied in by the ramdisk rules in `Android.mk`).
+`bootsplash()` in `init-script` now runs:
+
+```sh
+zcat /bootsplash.gz | /bin/fbsplash
+```
+
+The sequence, and why each step is needed:
+
+| Step | Why |
+|---|---|
+| `clone(SIGCHLD)`, parent exits | boot never waits on the display; the only cost is `zcat` filling the pipe |
+| `open("/dev/fb0", O_RDWR)` | also unblanks: `mdss_fb_open()` (`:2951`) runs `FB_BLANK_UNBLANK` on first open, without which `mdss_fb_pan_display_ex()` bails at `mdss_fb_is_power_off()` (`:3423`) |
+| `FBIOGET_{F,V}SCREENINFO` | `fix.smem_len` is populated at registration (`:2888`) even with no memory allocated |
+| `mmap(smem_len)` | **the load-bearing step** — triggers the lazy ION allocation (`:2495` → `:2371`), which is what sets `screen_base` (`:2437`) *and* `mfd->fbmem_buf` (`:2400`), the dma_buf MDP scans out from. Larger than `smem_len` → `-EOVERFLOW` (`:2490`) |
+| `read(stdin)` into the map | mapping is write-combine (`:1426`, `:2532`), so no cache maintenance and `read(2)` can land straight in it |
+| `FBIOPAN_DISPLAY`, `yoffset = 0` | the commit. `mdss_mdp_overlay_pan_display()` sources the pipe at `xoffset*bpp + yoffset*line_length` (`mdss_mdp_overlay.c:3414`) and calls `mdss_mdp_overlay_start()`, whose kerneldoc (`:1342`) describes this exact splash→bootanimation handoff. `var.activate` is **not** consulted on this path (only `FBIOPUT_VSCREENINFO` reads it, `fbmem.c:1002`) |
+| **do not close** — sleep forever holding the fd | see the third blocker above |
+
+Because the pan offset is now explicit, the image only needs **one** screen
+(4352 × 1920 = 8,355,840 bytes); `make-bootsplash.py` defaults to `--buffers 1`.
+
+Escape hatch if the holder process is ever in the way: `killall fbsplash` (it releases the fd and
+blanks the panel). Turning the whole thing off again is `HYBRIS_BOOTLOGO := 0` in `Android.mk`.
+
+### Fourth blocker: do not link this against bionic
+
+The first working version of the logic above still produced nothing, because it never reached
+`main()`:
+
+```
+[    4.000389] random: fbsplash urandom read with 93 bits of entropy available
+[    4.000674] Unhandled fault: alignment fault (0x92000021) at 0x9aab744d0267201b
+
++ zcat /bootsplash.gz
++ /bin/fbsplash
+Bus error
+```
+
+The fault address is different on every run and carries full entropy, i.e. bionic's static startup
+dereferences random bytes shortly after seeding itself from `/dev/urandom` — its TLS/main-thread
+setup does not survive this environment. A 1.3 KB freestanding test binary runs in the same shell
+without complaint, so the initramfs itself is fine.
+
+The reason this has never bitten anyone before: **the busybox in the initramfs is not an Android
+binary.** `file` calls it *"statically linked, for GNU/Linux 3.7.0"* — a glibc prebuilt. Nothing
+else in the hybris-boot ramdisk is compiled against bionic.
+
+So `fbsplash.c` is freestanding: raw `svc #0` syscalls, its own `_start`, `-nostdlib`, hand-copied
+`fb_{fix,var}_screeninfo` (with `_Static_assert`s on their sizes, since a hand-copied UAPI struct's
+size is the one thing that can silently drift). `Android.mk` therefore builds it with a direct
+`clang` rule rather than `BUILD_EXECUTABLE`. **Do not convert it back to a normal module.**
+
+Being freestanding also removed the last reason for a watchdog. An earlier draft armed `alarm(10)`
+around the ioctls because `FBIOPAN_DISPLAY` can block for `WAIT_DISP_OP_TIMEOUT` = 30 s
+(`mdss_fb.h:46`). That buys nothing here: the process forks before touching the display, so a hang
+costs no boot time, and it is *meant* to live forever holding `fb0` — a hung pan and a successful
+one cost exactly the same. Three syscalls of signal setup, deleted.
+
+### Verified on hardware
+
+`fastboot boot hybris-recovery.img`, then on the telnet shell at `192.168.2.15:23`:
+
+```
+# zcat /bootsplash.gz | /bin/fbsplash
+fbsplash: fb0 xres=1080 yres=1920 yres_virtual=3840 bpp=32 line_length=4352 smem_len=16711680
+fbsplash: copied 8355840 of 16711680 bytes
+fbsplash: splash displayed, holding /dev/fb0 open
+```
+
+The wordmark appears on the panel and stays. The geometry line doubles as a check on the
+hand-copied structs — it must match `/sys/class/graphics/fb0/{virtual_size,stride,bits_per_pixel}`.
+Killing an older `fbsplash` while a newer one holds `fb0` leaves the image up, as the refcount
+analysis predicts.
+
+### The artwork
+
+`assets/sfosboot.png` is the official Sailfish wordmark: **black artwork on a transparent
+background**. Composited onto a black splash that is a black rectangle, so `make-bootsplash.py`
+defaults to `--ink white`, which ignores the artwork's own colour and uses its **alpha channel as
+ink coverage**, painted white on black — preserving the anti-aliasing. Scaling is a single
+`min()` factor for both axes (never stretched), positioned by `--fit-width` / `--center-y`.
 
 > **Dead ends, recorded so they are not retried:** writing the image into both framebuffer
 > buffers (the offset is not the problem); correcting the image geometry to stride 4352 × 1920
-> (the size was already right — it matches `stride * virtual_h` exactly); and retrying the write
-> up to 15 times (it can never succeed, and cost 15 s on every boot until reverted).
+> (the size was already right — it matches `stride * virtual_h` exactly); retrying the write
+> up to 15 times (it can never succeed, and cost 15 s on every boot until reverted); and building
+> the helper as an ordinary Android `BUILD_EXECUTABLE` (see the fourth blocker above).
 
 ---
 
