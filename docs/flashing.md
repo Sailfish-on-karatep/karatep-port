@@ -247,6 +247,73 @@ reboot
 
 ---
 
+# 11. Install the fixed fingerprint HAL service
+
+**Required for working fingerprints.** Without it the sensor appears to work but
+misbehaves badly: enrolled fingerprints are not listed, enrolling again fails
+with "already enrolled", and **a fingerprint deleted in Settings still unlocks
+the device**.
+
+This is the one part of the port an image build cannot deliver. The service
+lives on the LineageOS **vendor** partition, which Sailfish never writes, so it
+has to be installed by hand — once. It then survives Sailfish reimages, and is
+only lost if you reflash the vendor partition.
+
+Why it is needed, briefly: FPC's vendor library returns the template *count*
+where `fingerprint.h` specifies 0, and the stock HIDL adapter treats any
+non-zero return as an error — so it never hands the daemon a single template id.
+Full analysis in
+[`porting-notes.md`](porting-notes.md#root-caused-and-fixed-the-hidl-adapter-read-a-count-as-an-error-code).
+
+Build it (HABUILD SDK), from a tree with `local_manifests.xml` applied, which
+repins `hardware/lineage/interfaces` at the karatep fork carrying the fix:
+
+```sh
+make android.hardware.biometrics.fingerprint@2.0-service
+# out/target/product/karatep/vendor/bin/hw/android.hardware.biometrics.fingerprint@2.0-service
+```
+
+Copy it to the booted device (over the USB network), then **as root on the
+device**:
+
+```sh
+B=/vendor/bin/hw/android.hardware.biometrics.fingerprint@2.0-service
+
+mount -o remount,rw /vendor
+cp -a "$B" "$B.orig"                    # keep the original beside it
+mv  "$B" "$B.busy"                      # a running binary cannot be overwritten
+cp  /path/to/new-service "$B"           # ("Text file busy"); ctl.stop is not reliable
+chmod 755 "$B"
+chown root:shell "$B"
+
+# restore the exec label -- a fresh cp lands as vendor_file, and chcon is not
+# on the device
+python3 -c 'import os; os.setxattr("'"$B"'", "security.selinux",
+    b"u:object_r:hal_fingerprint_default_exec:s0\x00")'
+
+rm -f "$B.busy"
+reboot                                  # the ro remount fails while the old
+                                        # binary is still open; the reboot settles it
+```
+
+Verify after reboot — the trustlet's count and the daemon's list must agree:
+
+```sh
+systemctl restart sailfish-fpd-community
+/usr/libexec/droid-hybris/system/bin/logcat -d | grep -a "fpc_enumerate indices_count"
+dbus-send --system --print-reply --dest=org.sailfishos.fingerprint1 \
+    /org/sailfishos/fingerprint1 org.sailfishos.fingerprint1.GetAll
+```
+
+Templates already in the store but with no name appear as `Unknown <id>`; those
+are real and can unlock the device, so remove any you do not recognise. Note the
+lock screen holds a continuous identify session, so removal returns
+`ALREADY_BUSY` until the device is unlocked and the screen kept awake.
+
+To revert, restore `"$B.orig"` over `"$B"` the same way.
+
+---
+
 # Troubleshooting
 
 ## `curl: not found`
