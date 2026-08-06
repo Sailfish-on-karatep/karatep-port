@@ -724,9 +724,11 @@ local edit:
 
 `hybris/mw` is not `repo`-managed, so there is no `local_manifests` line to repin — the clone
 itself must come from the fork. Rebuild with
-`rpm/dhd/helpers/build_packages.sh -m sailfish-fpd-community` -- the repo is a **separate
-argument**, not `-m=REPO`. The `=` form is parsed as part of the name and the helper tries to
-clone `https://github.com/mer-hybris/=sailfish-fpd-community.git`, which fails confusingly.
+`rpm/dhd/helpers/build_packages.sh --mw=sailfish-fpd-community`. The helper parses options with
+`getopt` and `--mw` takes an *optional* argument, so the value must be attached: `--mw=REPO`, or
+`-mREPO` for the short form. `-m=REPO` passes `=REPO` as the name and the helper tries to clone
+`https://github.com/mer-hybris/=REPO.git`; `-m REPO` leaves REPO unconsumed and dies with
+`unknown option(s)`. Neither message points at the argument.
 
 ---
 
