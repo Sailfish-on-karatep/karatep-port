@@ -294,6 +294,56 @@ condition, and which would otherwise have dropped every legacy WPA2 AP).
 here and never defined anywhere in this tree. So a WPA3-**transition** AP works via WPA2-PSK +
 PMF; a WPA3-**only** AP cannot work without backporting external-auth into cfg80211.
 
+### Associated, IP address, gateway reachable — and every name lookup fails
+
+Symptom: WLAN connects, connman reports the service `online`, `ping 8.8.8.8` works, but nothing
+resolves, so nothing in the UI can reach the internet. `getent hosts google.com` returns nothing
+(`rc=2`) and `systemd-resolve google.com` says *"All attempts to contact name servers or networks
+failed"*.
+
+**Cause: `CONFIG_ANDROID_PARANOID_NETWORK` + systemd-resolved's own service user.** The kernel is
+built with paranoid networking, and it must be — per
+[hadk-faq](https://github.com/mer-hybris/hadk-faq/blob/master/README.rst), *"since hybris-12.1,
+rild does not work without ANDROID_CONFIG_PARANOID_NETWORK"*, so turning it off would cost us
+cellular. With it on, `socket(AF_INET, …)` fails with `EPERM` for any process whose groups do not
+include `AID_INET` (gid 3003, `inet`) — the call never reaches the network at all. Verified
+directly on device: as uid 997 socket creation raises `PermissionError`; with `setgroups([3003])`
+first it succeeds.
+
+The documented fix is to put the user in `inet`, which droid-hal-device autodetects and does
+(`mer_verify_kernel_config` marks the flag `y,n` and says as much; `mal`, IRC 2017-01-15: *"devices
+that need paranoid need to have nemo user in inet group, this is done in latest dhd submodule"*).
+That covers `defaultuser` — and used to be the whole story, because connman resolved names itself.
+
+**Sailfish 5.x moved DNS to systemd-resolved**, and dhd's autodetect does not follow it there.
+connman is built with `src/dns-systemd-resolved.c` and hands the DHCP nameservers to
+`org.freedesktop.resolve1` via `SetLinkDNS` (visible in `systemd-resolve --status` as per-link DNS
+servers on `wlan0`), and `/etc/resolv.conf` points at the `127.0.0.53` stub. But
+`systemd-resolved.service` runs as its own system user `systemd-resolve` (uid 997), which is in no
+Android group, so it was denied every socket. In the debug log it shows as `Sending query packet`
+followed instantly by `Switching to DNS server …`, cycling all servers forever. The unit's
+`AmbientCapabilities=CAP_NET_RAW` cannot help: this is a group check, not a capability check.
+
+Fix — `droid-config-karatep`,
+`sparse/etc/systemd/system/systemd-resolved.service.d/99-android-inet-group.conf`:
+
+```ini
+[Service]
+SupplementaryGroups=inet
+```
+
+Two dead ends worth not repeating: the stub symlink `/etc/resolv.conf → stub-resolv.conf` is
+**correct**, not leftover cruft — deleting it does not make connman write a resolv.conf, because
+this connman delegates to resolved. And running resolved as `User=root` does not fix it either;
+it drops to uid 997 itself, so the socket is still denied (and clearing `CapabilityBoundingSet=`
+empties the set rather than resetting it, which just makes it fail earlier with *"Failed to change
+group ID"*).
+
+Note this applies to **any** non-root Sailfish daemon that needs a socket, not just resolved.
+Searching the IRC archive for `inet group` returns dozens of hits, but `127.0.0.53` and
+`stub-resolv` return **zero** — the paranoid-network mechanism is old and well documented, this
+particular victim of it is not.
+
 ---
 
 ## Hardware keys
