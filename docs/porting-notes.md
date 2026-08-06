@@ -186,14 +186,41 @@ See [Verify the boot image before flashing](#verify-the-boot-image-before-flashi
 
 ## WLAN
 
-Working. `wlan0` comes up at boot with a real MAC and connman scans normally:
+Working. `wlan0` comes up at boot and connman scans and associates normally:
 
 ```
 wlan  3795573  0
-wlan0  UP  00:0a:f5:02:15:e4
 wlan: WCNSS software version CNSS-PR-4-0-00325
-wlan: WCNSS hardware version WCN v2.0 RadioPhy with 19.2MHz XO
+wlan: WCNSS hardware version WCN v2.0 RadioPhy vUnknown with 19.2MHz XO
 ```
+
+### The radio is 2.4 GHz only, and that is a hardware limit
+
+`iw phy` reports **Band 1 only** — there is no 5 GHz band to enable. This is not a
+configuration gap: `/vendor/firmware/wlan/prima/WCNSS_qcom_cfg.ini` already permits both
+(`BandCapability=0`, `gDot11Mode=0`), and the band still does not appear. Lenovo specify
+802.11 b/g/n 2.4 GHz single-band for this handset. The MSM8937 platform supports 802.11ac,
+but this phone pairs it with the 2.4 GHz-only WCN companion part, so there is nothing to
+turn on. Do not spend time trying to "enable" 5 GHz.
+
+Note the driver still advertises VHT capabilities on Band 1; that is prima's static
+capability table, not a statement about the silicon.
+
+### The MAC address is read off the device, never stored
+
+`wlan0` does **not** get a real MAC by itself. All three of prima's inputs are empty or
+default on karatep, so `hdd_wlan_startup()` falls through to
+`hdd_generate_iface_mac_addr_auto()` and invents a `00:0a:f5:xx:xx:xx` address derived from
+the SoC serial. The real addresses live in `/mnt/vendor/persist/wlan_mac.bin`, which nothing
+under Sailfish reads.
+
+`droid-config-karatep`'s `sparse/usr/bin/droid/macaddrsetup.sh` feeds the real address to the
+platform driver through `wcnss_mac_addr` **before** `modprobe wlan`, as an `ExecStartPre` of
+`wlan-module-load.service` — prima reads that value exactly once, at module init. See the
+script for the full derivation and for why `ip link set wlan0 address` is the wrong fix.
+
+Addresses are per-device and are read at boot; none are committed to any repo, and none
+should be pasted into these docs.
 
 Two things matter, and both produce the same unhelpful symptom (`no wlan0`):
 
@@ -226,6 +253,81 @@ Things that look suspicious here but are **not** the problem, all verified:
 `droid.late_start=trigger_late_start` is set, `wcnss_service` is running, `subsys2: wcnss=ONLINE`,
 the PIL firmware images (`wcnss.b00`…) are present, and `a000000.qcom,wcnss-wlan` is bound to
 the `wcnss_wlan` platform driver.
+
+### WPA3-transition APs: `CTRL-EVENT-ASSOC-REJECT status_code=1`
+
+Any AP advertising PMF (802.11w) failed instantly, while plain WPA2 APs connected fine. The
+give-away is the timing: the reject arrives in the *same second* as the connect call, with no
+authentication or association frames on air — so the AP is never involved and the failure is
+entirely inside the driver.
+
+```
+nl80211: Connect (ifindex=31)
+  * IEs - hexdump(len=46): 30 1a 01 00 00 0f ac 04 ... 8c 00 00 00 00 0f ac 06 ...
+nl80211: Connect event (status=1 ...)
+wlan0: CTRL-EVENT-ASSOC-REJECT status_code=1
+```
+
+RSN capabilities `8c 00` mean MFPC set, MFPR clear — PMF capable, not required. A quick way to
+spot such an AP in the scan results is the RSN IE length: `rsn_ie_len=28` against `24` for a
+non-PMF AP, the extra 4 bytes being the group management cipher suite.
+
+`hdd_SetGENIEToCsr()` sets `MFPCapable=1` from those bits, but `MFPEnabled` came from
+`wlan_hdd_cfg80211_set_privacy()` as `(req->mfp == NL80211_MFP_REQUIRED)`. **On a 3.18 kernel
+`req->mfp` cannot express "optional"**: `enum nl80211_mfp` has only `NL80211_MFP_NO` and
+`NL80211_MFP_REQUIRED` (`OPTIONAL` was added upstream in 4.9), and `net/wireless/nl80211.c`
+rejects any other value with `-EINVAL`. wpa_supplicant, asking for optional PMF, therefore
+sends no `NL80211_ATTR_USE_MFP` at all and it defaults to `NL80211_MFP_NO`.
+
+That leaves `MFPEnabled=0` with `MFPCapable=1`, which is exactly what
+`csrIsPmfConnectionAllowed()` rejects when the AP is also PMF-capable — the AP is dropped as a
+candidate before any association is attempted.
+
+Fixed in the kernel fork by deriving `MFPEnabled` from the RSN capability bits the supplicant
+actually sent, and by allowing the optional-PMF/AP-not-capable case in
+`csrIsPmfConnectionAllowed()` (whose comment contradicted the `!MFPRequired` in its own
+condition, and which would otherwise have dropped every legacy WPA2 AP).
+
+**WPA3-SAE is a different matter and is not available.** prima does ship SAE
+(`CONFIG_WLAN_FEATURE_SAE := y`), but every SAE path is gated on
+`CFG80211_EXTERNAL_AUTH_SUPPORT`, which needs `NL80211_CMD_EXTERNAL_AUTH` — Linux 4.17, absent
+here and never defined anywhere in this tree. So a WPA3-**transition** AP works via WPA2-PSK +
+PMF; a WPA3-**only** AP cannot work without backporting external-auth into cfg80211.
+
+---
+
+## Hardware keys
+
+The three capacitive keys come from the **touchscreen controller**, not `gpio-keys`.
+`/proc/bus/input/devices` shows `fts_ts` with `KEY=400 0 0 100040008800 0 0`; decoding that word
+(keycodes 128–191, bits 11/15/30/44) gives `KEY_MENU(139)`, `KEY_WAKEUP(143)`, `KEY_BACK(158)`
+and `KEY_HOMEPAGE(172)`. The kernel was never the problem.
+
+Home and the app-switcher key did nothing because lipstick gates its entire hardware key
+handler on the device *declaring* the key — the tail of
+`/usr/share/lipstick-jolla-home-qt5/compositor.qml`:
+
+```qml
+Loader {
+    active: deviceInfo.hasHardwareKey(Qt.Key_HomePage)
+    source: "compositor/HardwareKeyHandler.qml"
+}
+```
+
+`ssu-sysinfo -k` printed nothing, so the handler was never instantiated. Back kept working
+because it is an ordinary `Qt::Key_Back` that applications handle themselves.
+
+`droid-config-karatep`'s `sparse/usr/share/csd/settings.d/50-karatep-hw-settings.ini` declares
+them. Two traps:
+
+- ssu-sysinfo globs `/usr/share/csd/settings.d/*hw-settings*.ini` — **the filename must contain
+  `hw-settings`** or it is never read.
+- The values must be **numeric** Qt key codes. `hw_key_parse()` uses `strtoul(pos, &end, 0)` and
+  bails at the first non-numeric token, so a readable `Key_HomePage` silently yields an empty
+  list.
+
+Verified on hardware: home opens the app switcher, the square key opens the top menu, back is
+unchanged.
 
 ---
 
