@@ -51,7 +51,7 @@ calls/SMS and SIM 2 are parked until a real SIM is available.
 | Audio — earpiece | ❓ | untested |
 | Audio — Bluetooth | ✅ | A2DP verified by hand |
 | Bluetooth | ✅ | pairing + A2DP verified. The old "controller init failed" reading was wrong — the HAL logs `Init succeded`; the 61 s cycle was `bluebinder` racing WLAN for the shared WCNSS SoC. Fixed by `Type=oneshot` on `wlan-module-load.service` plus an ordering drop-in; `bluebinder` no longer masked, `NRestarts=0` |
-| WLAN | ✅ | `wlan0` up at boot with the device's real MAC, associates and holds an IP. **2.4 GHz only — hardware limit**, not a config gap |
+| WLAN | ✅ | `wlan0` up at boot with the device's real MAC, associates, holds an IP and reaches the internet. **2.4 GHz only — hardware limit**, not a config gap. DNS needed a fix of its own: paranoid networking denied systemd-resolved (uid 997) any socket → [details](docs/porting-notes.md#associated-ip-address-gateway-reachable--and-every-name-lookup-fails) |
 | WLAN — WPA3 | ⚠️ | WPA3-**transition** APs work (WPA2-PSK + PMF) after the prima `MFPEnabled` fix. WPA3-**only** cannot work: SAE needs `NL80211_CMD_EXTERNAL_AUTH` (Linux 4.17), absent on 3.18 → [details](docs/porting-notes.md#wpa3-transition-aps-ctrl-event-assoc-reject-status_code1) |
 | WLAN hotspot | ❌ | |
 | Cellular — signal (SIM 1) | ✅ | |
@@ -61,7 +61,7 @@ calls/SMS and SIM 2 are parked until a real SIM is available.
 | VoLTE | ➖ | needs Jolla proprietary bits |
 | GPS | ❓ | untested |
 | Sensors | ⚠️ | rotation works; individual sensors unverified |
-| Fingerprint (FPC 1020) | ⚠️ | packaged, not yet hands-on tested. Kernel driver and the vendor HIDL 2.1 HAL were already running; needs `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) |
+| Fingerprint (FPC 1020) | ✅ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) plus a local fix: this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` now arms a 3 s timeout and treats silence as "nothing enrolled" |
 | Vibration | ✅ | |
 | Notification LED | ⚠️ | lights up, behaviour unverified |
 | Keys — power, volume | ✅ | |
