@@ -648,78 +648,85 @@ place on Android, not on a Sailfish rootfs. All six were missing: `gps.conf`, `i
 `sparse/etc/`. Long-standing advice from mal on `#sailfishos-porters` (2016-07-08, 2016-09-15,
 2019-06-27). It did **not** fix acquisition.
 
-### Local `/vendor/etc/gps.conf` changes on the test device
+### Assistance was completely dead, and why
 
-`/vendor` is the LineageOS partition and nothing in the image build touches it, so these are
-device-local and must be re-applied by hand (or reverted) deliberately. `gps.conf.orig` sits
-beside the file as the untouched original.
+The vendor GNSS HAL **never asks for assistance**. The modem asks -- every session carries
+`QMI_LOC_EVENT_INJECT_TIME_REQ_IND_V02` and `QMI_LOC_EVENT_WIFI_REQ_IND_V02` -- but the HAL does
+not propagate it. `geoclue-providers-hybris` handles `GNSS_REQUEST_TIME_CB` properly and calls
+`injectUtcTime()` from it; the callback simply never fires. `GNSS_REQUEST_LOCATION_CB` does fire,
+and its handler only logs. So nothing was ever injected: no time, no ephemeris, no position seed.
+Every attempt was a cold start with nothing to work from.
 
-| Setting | Stock | Now | Why |
-|---|---|---|---|
-| `DEBUG_LEVEL` | `2` | `5` | diagnostic only; **turn this back down** once GPS is settled, it is very noisy |
-| `XTRA_CA_PATH` | `/usr/lib/ssl-1.1/certs` | `/etc/ssl/certs` | the stock path does not exist on this device; this one does |
+The provider can be told to inject anyway, from `/etc/gps_xtra.ini`, which did not exist here:
 
-The `XTRA_CA_PATH` correction is worth keeping. `DEBUG_LEVEL` is not.
+```ini
+[ntp]
+NTP_FORCE_INJECT=true
 
-> `/etc/location/location.conf` also resets `agreement_accepted` back to `false` on its own -- the
-> settings service rewrites the file -- so accept the location agreement through Settings rather
-> than editing it, or it will silently revert.
-
-### Satellites are tracked positionally, but no signal is received
-
-Later sessions (after several reboots, with `DEBUG_LEVEL=5` and Qt debug on the provider) do
-produce `$GPGSV`, which earlier ones never did -- so the engine does search. What it reports is
-the important part:
-
-```
-GPGSV,4,1,15,05,66,181,,06,05,039,,11,34,014,,12,77,329,,1*68
-GPGSV,4,2,15,13,11,163,,14,00,000,,15,09,189,,17,00,000,,1*6E
-GPGSV,4,3,15,18,00,000,,19,19,075,,21,71,092,,22,07,142,,1*62
-GPGSV,4,4,15,24,23,222,,25,18,320,,29,00,000,,1*51
+[xtra]
+XTRA_FORCE_INJECT=true
+XTRA_SERVER_0=http://gllto.glpals.com/7day/v5/latest/lto2.dat
 ```
 
-Each satellite is `PRN,elevation,azimuth,SNR`. Fifteen satellites in view with plausible geometry
--- PRN 12 at 77 degrees, PRN 21 at 71, PRN 05 at 66 -- and **every SNR field is empty**. Elevation
-and azimuth are predicted from almanac, so this says the receiver knows exactly where the
-satellites are and hears nothing from any of them. `GPGSA` stays at fix type 1 with no satellites
-used, `GPGGA` at quality 0.
+The XTRA URLs have to be repeated in that file -- the provider reads them from its `[xtra]`
+section, not from `gps.conf`. Now shipped in droid-config's `sparse/etc/`. Verified:
 
-That is the signature of an RF problem rather than a software one: signal is not reaching the
-receiver. Candidates are the GNSS antenna connection, the LNA supply, or modem-side RF
-calibration. Note the recurring `reportSv: At least one RF_LOSS is 0 in gps.conf, please configure
-it` -- RF loss compensation is uncalibrated on this port, though that would skew reported C/No
-rather than blank it entirely, and it would not stop a fix.
-
-### The position mode patch, and why it is not the answer
-
-`geoclue-providers-hybris` picks the mode with
-
-```cpp
-gnssSetPositionMode(m_agpsEnabled ? HYBRIS_GNSS_POSITION_MODE_MS_BASED
-                                  : HYBRIS_GNSS_POSITION_MODE_STANDALONE, ...)
+```
+Forcing XTRA data injection / Forcing NTP injection
+Got NTP response from QHostAddress("139.59.55.93")
+injected 185775 bytes of xtra data
 ```
 
-and `m_agpsEnabled` is assigned from `LocationSettings::hybrisEnabled()` -- whether the provider is
-enabled at all -- not from `m_agpsOnlineEnabled`/`hybrisOnlineState()`. So assisted mode is
-requested unconditionally, including when the same process has decided not to send NTP or open the
-SUPL connection. Our fork (`Sailfish-on-karatep/geoclue-providers-hybris`, branch `hybris-18.1`
-off tag `0.3.0`) keys it off `m_agpsOnlineEnabled` instead.
+Time injection needed a code fix as well. `injectUtcTime()` gave up permanently when
+`defaultRoute()` returned an unnamed service with no time servers, which is what a D-Bus activated
+provider sees if it asks before connman has been queried:
 
-**This is not validated as a fix and should not be described as one.** Standalone could not
-actually be exercised: the requested mode stayed `MSB` even with `hybris\online_enabled=false`
-in `/etc/location/location.conf` at the moment the provider started, so `hybrisOnlineState()` is
-not reading that file the way the patch assumes. It is kept because requesting assisted mode while
-refusing to assist is wrong on any device, not because it changed anything here.
+```
+Time injection requested
+"" doesn't advertise time servers
+```
+
+The existing retry timer did not help because it re-sends to `m_ntpServers`, the list that was
+never populated. Fixed in our fork (`8ba190f`) by arming the timer on those paths and re-running
+`injectUtcTime()` while the list is empty. Note this was **not** what made time injection start
+working -- the successful run succeeded first try, once `NTP_FORCE_INJECT` made the call happen at
+all. It is insurance against a race that was observed, not the fix.
+
+### Changes that were tried and backed out
+
+Worth recording so they are not re-attempted:
+
+* **Position mode.** `geoclue-providers-hybris` picks MS_BASED vs STANDALONE from
+  `m_agpsEnabled`, which is assigned from `hybrisEnabled()` -- whether the provider is enabled at
+  all, not whether assistance is available. A patch to key it off `m_agpsOnlineEnabled` was
+  committed and then **reverted** (`7f3007b`). It was never validated -- the mode stayed MSB in
+  every test, because `hybrisOnlineState()` does not track `hybris\online_enabled` in
+  `location.conf` the way the patch assumed -- and once forced injection worked its premise was
+  gone: assistance *is* available, so MS_BASED is right, and forced injection is driven by the
+  gps_xtra.ini flags rather than by `m_agpsOnlineEnabled` anyway.
+* **`/vendor/etc/gps.conf` edits.** `DEBUG_LEVEL=5` was diagnostic. `XTRA_CA_PATH` was pointed at
+  `/etc/ssl/certs` because the stock `/usr/lib/ssl-1.1/certs` does not exist -- but it never
+  mattered: the XTRA download that now works is done by geoclue-hybris over plain HTTP, not by
+  `xtra-daemon` over HTTPS. Both reverted; `/vendor` is stock again apart from the fingerprint
+  service, which is genuinely required. `gps.conf.orig` is kept beside it.
+* **`/etc` config symlinks** are kept, but they changed nothing measurable and remain unproven.
 
 ### Where it stands
 
-The failure is that the modem never powers the GNSS engine, which is below anything userspace
-configures. Remaining suspects are modem-side GNSS enablement (NV/calibration) and the RF path.
+The software chain is now doing everything it should: sessions start, the engine searches, both
+constellations are tracked, and time and ephemeris are injected. What is left is signal level.
 
-The next experiment is to force `GNSS_POSITION_MODE_STANDALONE` -- a fork of
-`geoclue-providers-hybris` -- which removes assistance from the question entirely. If GSV is still
-absent in standalone under a clear sky, the conclusion is hardware or modem-side rather than
-anything the port can configure.
+Under clear sky the receiver reaches only about **22 dBHz** on a satellite at 76-80 degrees
+elevation -- essentially overhead, where open sky should give 35-45 dBHz -- and only one satellite
+is heard at a time. Four are needed to fix. Nothing in software explains a ~20 dB deficit.
+
+The kernel device tree has **no GPS entries at all** for karatep or karate-common, so no LNA
+regulator or antenna GPIO is under our control; it is modem-controlled or always-on hardware.
+
+The measurement to make next is a comparison, not another code change: on the same handset in the
+same spot, an Android build should report 35-45 dBHz on an overhead satellite. If it reports ~22
+as well, the port is doing its job and this is the unit's ceiling. If it reports 40+, something
+switches the LNA on that we do not.
 
 > Two false trails, recorded so they are not walked again: the 30 s session cycle is client churn,
 > not GNSS behaviour; and `LocSvc_GnssInterface: serviceDied` is the HAL reporting that *its
