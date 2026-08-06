@@ -54,6 +54,27 @@
 		name="Sailfish-on-karatep/karatep-patches" revision="hybris-18.1" />
 
 	<!--
+	  hardware/lineage/interfaces: karatep fork, same "Contribute your mods
+	  back" pattern as hybris-boot above.
+
+	  It carries one commit: the fingerprint 2.0 HIDL adapter must accept a
+	  vendor library that returns a template count where fingerprint.h
+	  specifies 0. FPC's library does exactly that, so ErrorFilter() turned
+	  successful set_active_group() and enumerate() calls into SYS_UNKNOWN and
+	  enumerate() never synthesised its onEnumerate callbacks. With no template
+	  ids reaching the client, remove() could not address the right template:
+	  deleting a fingerprint appeared to work and the template survived, so a
+	  deleted finger still unlocked the device and reappeared at the next boot.
+
+	  No mer-hybris hybris-patch touches this project, so a fork is the right
+	  mechanism and no patch is involved.
+	-->
+	<remove-project name="LineageOS/android_hardware_lineage_interfaces" />
+	<project path="hardware/lineage/interfaces"
+		name="Sailfish-on-karatep/android_hardware_lineage_interfaces"
+		revision="hybris-18.1" />
+
+	<!--
 	  Drop the Chromium WebView patches project.
 
 	  LineageOS' manifest (snippets/lineage.xml) declares
