@@ -15,8 +15,8 @@ Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on t
 
 ### Currently working on
 
-Bluetooth: the Qualcomm HAL aborts with `controller init failed` roughly every 61 s. Next after
-that: the IMS daemon crash-loop, and mobile data.
+Loudspeaker, camera video-mode crash, power management, and the unclean shutdown. Mobile data,
+calls/SMS and SIM 2 are parked until a real SIM is available.
 
 ### Recently fixed
 
@@ -49,9 +49,10 @@ that: the IMS daemon crash-loop, and mobile data.
 | Audio — loudspeaker | ✅ | |
 | Audio — 3.5 mm | ❌ | jack detected, not routed |
 | Audio — earpiece | ❓ | untested |
-| Audio — Bluetooth | ❌ | |
-| Bluetooth | ❌ | BT HAL aborts on "controller init failed"; `bluebinder` masked → [details](docs/porting-notes.md#bluetooth-broken) |
-| WLAN | ✅ | `wlan0` up at boot, connman scans and lists APs |
+| Audio — Bluetooth | ✅ | A2DP verified by hand |
+| Bluetooth | ✅ | pairing + A2DP verified. The old "controller init failed" reading was wrong — the HAL logs `Init succeded`; the 61 s cycle was `bluebinder` racing WLAN for the shared WCNSS SoC. Fixed by `Type=oneshot` on `wlan-module-load.service` plus an ordering drop-in; `bluebinder` no longer masked, `NRestarts=0` |
+| WLAN | ✅ | `wlan0` up at boot with the device's real MAC, associates and holds an IP. **2.4 GHz only — hardware limit**, not a config gap |
+| WLAN — WPA3 | ⚠️ | WPA3-**transition** APs work (WPA2-PSK + PMF) after the prima `MFPEnabled` fix. WPA3-**only** cannot work: SAE needs `NL80211_CMD_EXTERNAL_AUTH` (Linux 4.17), absent on 3.18 → [details](docs/porting-notes.md#wpa3-transition-aps-ctrl-event-assoc-reject-status_code1) |
 | WLAN hotspot | ❌ | |
 | Cellular — signal (SIM 1) | ✅ | |
 | Cellular — calls / SMS | ❓ | untested |
@@ -60,12 +61,12 @@ that: the IMS daemon crash-loop, and mobile data.
 | VoLTE | ➖ | needs Jolla proprietary bits |
 | GPS | ❓ | untested |
 | Sensors | ⚠️ | rotation works; individual sensors unverified |
-| Fingerprint (FPC 1020) | ❌ | |
+| Fingerprint (FPC 1020) | ⚠️ | packaged, not yet hands-on tested. Kernel driver and the vendor HIDL 2.1 HAL were already running; needs `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) |
 | Vibration | ✅ | |
 | Notification LED | ⚠️ | lights up, behaviour unverified |
 | Keys — power, volume | ✅ | |
 | Keys — back | ✅ | |
-| Keys — home, nav | ❌ | |
+| Keys — home, nav | ✅ | home → app switcher, square → top menu. The keys come from the touch controller and always worked; lipstick just needed them declared to `ssu-sysinfo` → [details](docs/porting-notes.md#hardware-keys) |
 | USB — networking, data, charging | ✅ | |
 | Power management | ❓ | untested |
 | RTC alarms | ❓ | untested |
