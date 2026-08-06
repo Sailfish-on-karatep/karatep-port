@@ -665,11 +665,15 @@ NTP_FORCE_INJECT=true
 
 [xtra]
 XTRA_FORCE_INJECT=true
-XTRA_SERVER_0=http://gllto.glpals.com/7day/v5/latest/lto2.dat
+XTRA_SERVER_0=https://gllto.glpals.com/7day/v5/latest/lto2.dat
 ```
 
 The XTRA URLs have to be repeated in that file -- the provider reads them from its `[xtra]`
-section, not from `gps.conf`. Now shipped in droid-config's `sparse/etc/`. Verified:
+section, not from `gps.conf`. Use **https**: the vendor's `gps.conf` lists these as plain `http://`,
+and XTRA is ephemeris injected straight into the GNSS engine, so an unauthenticated fetch is a
+tamper vector. All three hosts serve the same 185775-byte file over TLS with a valid certificate,
+and the provider fetches through Qt against the system CA store. Now shipped in droid-config's
+`sparse/etc/`. Verified:
 
 ```
 Forcing XTRA data injection / Forcing NTP injection
@@ -706,8 +710,9 @@ Worth recording so they are not re-attempted:
   gps_xtra.ini flags rather than by `m_agpsOnlineEnabled` anyway.
 * **`/vendor/etc/gps.conf` edits.** `DEBUG_LEVEL=5` was diagnostic. `XTRA_CA_PATH` was pointed at
   `/etc/ssl/certs` because the stock `/usr/lib/ssl-1.1/certs` does not exist -- but it never
-  mattered: the XTRA download that now works is done by geoclue-hybris over plain HTTP, not by
-  `xtra-daemon` over HTTPS. Both reverted; `/vendor` is stock again apart from the fingerprint
+  mattered on our path: the XTRA download is done by geoclue-hybris through Qt against the system
+  CA store, not by `xtra-daemon`. It is still broken for `xtra-daemon` if that is ever made to
+  work. Both reverted; `/vendor` is stock again apart from the fingerprint
   service, which is genuinely required. `gps.conf.orig` is kept beside it.
 * **`/etc` config symlinks** are kept, but they changed nothing measurable and remain unproven.
 
