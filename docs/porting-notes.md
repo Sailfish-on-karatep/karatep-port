@@ -572,7 +572,7 @@ local edit:
 | | |
 |---|---|
 | Fork | `Sailfish-on-karatep/sailfish-fpd-community`, branch `hybris-18.1` |
-| Commits | `6c22a6f` — *Do not hang forever when the HAL never answers enumerate()*<br>`9c85dd7` — *Survive a HAL that fails enumerate() when templates exist* |
+| Commits | `6c22a6f` — *Do not hang forever when the HAL never answers enumerate()*<br>`c9ad20c` — *Survive a HAL that fails enumerate() when templates exist* |
 | Consumed at | `$ANDROID_ROOT/hybris/mw/sailfish-fpd-community` (`origin` = the fork, `upstream` = sailfishos-open) |
 
 `hybris/mw` is not `repo`-managed, so there is no `local_manifests` line to repin — the clone
@@ -634,13 +634,57 @@ dbus-send --system --print-reply --dest=org.sailfishos.fingerprint1 \
 
 If `user.db` and `fingerprints.db` have content but `GetAll` is empty, this is the bug.
 
-Fixed in the fork (`9c85dd7`): finish the enumeration round even when the call fails, and track
+Fixed in the fork (`c9ad20c`): finish the enumeration round even when the call fails, and track
 whether the list genuinely came back from the HAL. `loadFingers()` only reconciles the persisted
 map against the HAL when that list is real; otherwise the stored fingers are kept as-is.
 
 > That reconcile is the dangerous part. It prunes every finger not in the enumerated list and then
 > `saveFingers()` writes the result back, so one failed enumeration would erase the names from disk
 > permanently while the templates stayed in the trustlet.
+
+### The real root cause: the HIDL wrapper reads a count as an error code
+
+The FPC vendor library returns the **number of templates** and the LineageOS HIDL service treats
+any non-zero return as a failure. The HAL says so in as many words:
+
+```
+E fpc_fingerprint_hal: fpc_set_active_group There are 3 fingerprints in userdb 0
+E ...fingerprint@2.0-service: An unknown error returned from fingerprint vendor library: 3
+```
+
+`fpc_set_active_group` succeeded — it found the group and counted three fingerprints — and the
+wrapper turned that into `SYS_UNKNOWN`. `enumerate()` behaves identically
+(`fpc_enumerate indices_count 3` then "vendor library: 3"). This single mis-mapping explains every
+fingerprint symptom on this port, including why everything looked fine with an empty store: zero
+templates returns 0, which the wrapper accepts.
+
+Nothing in `/vendor` can be patched, so the workarounds live in `sailfish-fpd-community`.
+
+### Deleting a fingerprint does not delete it (security-relevant)
+
+**A fingerprint removed in the UI still unlocks the device.** The daemon drops the name from its
+own map and persists that, but the template stays in the trustlet:
+
+| | |
+|---|---|
+| Templates in the TEE | 3 (`fpc_enumerate indices_count 3`) |
+| Fingerprints listed by `GetAll` | 1 |
+| `user.db` | grew 288 KB → 386 KB across enrol/delete cycles; never shrinks |
+
+Observed directly: three fingers deleted through the UI stopped working, then **worked again after
+a reboot**, because the HAL reloads `user.db`, which still contains them. Only the name mapping in
+`fingerprints.db` was ever really removed.
+
+This is almost certainly downstream of the mis-mapping above — the wrapper reports
+`setActiveGroup` as failed, so removals are never persisted to the store the HAL is holding — but
+that has not been proven yet, and no fix is in the tree.
+
+> Until this is fixed, do not treat the fingerprint list in Settings as the set of fingerprints
+> that can unlock the device. To be sure a fingerprint is gone, clear the store:
+> stop `sailfish-fpd-community`, delete `/data/system/users/100000/fpdata/user.db` and
+> `/var/lib/sailfish-fpd-community/100000/fingerprints.db`, reboot, and enrol again.
+
+---
 
 ### Do not restart `vendor.fps_hal`
 

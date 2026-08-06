@@ -15,7 +15,8 @@ Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on t
 
 ### Currently working on
 
-Camera video-mode crash, power management, and the unclean shutdown. Mobile data, calls/SMS and
+Fingerprint removal (a deleted finger still unlocks the device), camera video-mode crash, power
+management, and the unclean shutdown. Mobile data, calls/SMS and
 SIM 2 are parked until a real SIM is available.
 
 ### Recently fixed
@@ -67,7 +68,7 @@ SIM 2 are parked until a real SIM is available.
 | VoLTE | ➖ | needs Jolla proprietary bits |
 | GPS | ❓ | untested |
 | Sensors | ⚠️ | rotation works; individual sensors unverified |
-| Fingerprint (FPC 1020) | ⚠️ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled". The same HAL quirk from the other side — `enumerate()` fails outright once templates *do* exist — made enrolled fingerprints appear lost after a reboot and blocked re-enrolment; also fixed in the fork. **Unlock is unverified since that fix.** → [details](docs/porting-notes.md#fingerprint-fpc-1020) |
+| Fingerprint (FPC 1020) | ⚠️ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled". The same HAL quirk from the other side — `enumerate()` fails outright once templates *do* exist — made enrolled fingerprints appear lost after a reboot and blocked re-enrolment; also fixed in the fork. **Deleting a fingerprint does not remove it from the trustlet — a deleted finger still unlocks the device.** Root cause for all of it: the FPC vendor library returns the template *count* and the HIDL wrapper treats non-zero as an error (`fpc_set_active_group There are 3 fingerprints in userdb 0` → "vendor library: 3"). → [details](docs/porting-notes.md#fingerprint-fpc-1020) |
 | Vibration | ✅ | |
 | Notification LED | ⚠️ | lights up, behaviour unverified |
 | Keys — power, volume | ✅ | |
