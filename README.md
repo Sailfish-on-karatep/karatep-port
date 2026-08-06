@@ -61,7 +61,7 @@ calls/SMS and SIM 2 are parked until a real SIM is available.
 | VoLTE | ➖ | needs Jolla proprietary bits |
 | GPS | ❓ | untested |
 | Sensors | ⚠️ | rotation works; individual sensors unverified |
-| Fingerprint (FPC 1020) | ✅ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) plus a local fix: this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` now arms a 3 s timeout and treats silence as "nothing enrolled" |
+| Fingerprint (FPC 1020) | ✅ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled" → [details](docs/porting-notes.md#fingerprint-fpc-1020) |
 | Vibration | ✅ | |
 | Notification LED | ⚠️ | lights up, behaviour unverified |
 | Keys — power, volume | ✅ | |

@@ -346,6 +346,53 @@ particular victim of it is not.
 
 ---
 
+## Fingerprint (FPC 1020)
+
+The kernel driver and the vendor HIDL `android.hardware.biometrics.fingerprint@2.1` HAL were both
+already running; what was missing was the Sailfish side. Jolla's `sailfish-fpd` is unusable here —
+it needs a per-device `sailfish-fpd-slave`, and none exists for karatep — so the port uses
+[`sailfish-fpd-community`](https://github.com/sailfishos-open/sailfish-fpd-community), pulled in by
+`droid-config-karatep` together with `sailfish-devicelock-fpd`. That last one **Conflicts** with
+`jolla-devicelock-daemon-encsfa`, so the old daemon has to come out of the pattern or `mic` fails
+to resolve.
+
+### The daemon wedges in `FPSTATE_ENUMERATING` and enrolment can never start
+
+Symptom: Settings shows the fingerprint page, but no enrolment ever begins. `journalctl -u
+sailfish-fpd-community` stops at `void AndroidFP::enumerate()` and
+
+```sh
+dbus-send --system --print-reply --dest=org.sailfishos.fingerprint1 \
+  /org/sailfishos/fingerprint1 org.sailfishos.fingerprint1.GetState
+```
+
+returns `FPSTATE_ENUMERATING` forever. `enumerateCallback` never appears in the log.
+
+**Cause:** on a fresh install with no templates, this vendor `@2.1` HAL simply stays silent —
+`u_hardware_biometry_enumerate()` returns `SYS_OK` and no callback ever arrives, so `enumerated()`
+is never emitted. Every other operation is gated on leaving that state, so the daemon is stuck.
+Later HIDL revisions require one callback with `finger=0`/`remaining=0` to mean "no templates";
+this one predates that. Upstream issue #31 looks similar but blames stale `fpdata` — not our case:
+`/data/system/users/100000/fpdata` existed, correctly owned and empty. On IRC, Mister_Magister
+(2026-03-18) hit the same silence and worked around it by skipping enumeration entirely.
+
+**Fix:** arm a 3 s single-shot timer around the enumerate call and treat silence as "nothing
+enrolled"; a HAL that does answer stops the timer in `enumerateCallback()`, so well-behaved
+devices are unaffected. This is a source change to the middleware, so it lives on a fork, not as a
+local edit:
+
+| | |
+|---|---|
+| Fork | `Sailfish-on-karatep/sailfish-fpd-community`, branch `hybris-18.1` |
+| Commit | `6c22a6f` — *Do not hang forever when the HAL never answers enumerate()* |
+| Consumed at | `$ANDROID_ROOT/hybris/mw/sailfish-fpd-community` (`origin` = the fork, `upstream` = sailfishos-open) |
+
+`hybris/mw` is not `repo`-managed, so there is no `local_manifests` line to repin — the clone
+itself must come from the fork. Rebuild with
+`rpm/dhd/helpers/build_packages.sh -m=sailfish-fpd-community`.
+
+---
+
 ## Hardware keys
 
 The three capacitive keys come from the **touchscreen controller**, not `gpio-keys`.
@@ -664,7 +711,6 @@ done | sort -u
   is Linux 5.0+ and this kernel is 3.18; the legacy `/dev/{,hw,vnd}binder` nodes are correct.)
 * 3.5 mm audio routing — jack is detected, audio is not routed.
 * Mobile data does not work; SIM slot 2 reports "Network: Denied".
-* Fingerprint (FPC 1020) unsupported.
 * Cameras and RIL are flaky.
 
 ---
