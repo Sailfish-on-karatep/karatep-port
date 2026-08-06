@@ -172,6 +172,16 @@ port_open "$TELNET_PORT" \
 
 # ------------------------------------------------------------------ http server
 
+# Re-derive the host address. It was determined before the device was bounced into
+# fastboot and back, and the RNDIS interface is torn down and re-created across that
+# reboot -- the host end frequently comes back on a DIFFERENT address (seen:
+# 192.168.2.11 -> 192.168.2.20). Binding the stale one makes python3 -m http.server
+# exit immediately and the script dies with a bare "http server failed to start".
+HOST_IP=$(ip -4 -o route get "$DEVICE_IP" 2>/dev/null | sed -n 's/.*[[:space:]]src[[:space:]]\([0-9.]\+\).*/\1/p')
+[ -n "$HOST_IP" ] \
+    || die "could not determine the host IP facing $DEVICE_IP (try: ip -4 route get $DEVICE_IP)"
+say "Host address on the USB link (re-checked): $HOST_IP"
+
 if command -v ss >/dev/null && ss -ltn 2>/dev/null | grep -q ":$HTTP_PORT "; then
     die "port $HTTP_PORT is already in use; pass --port to pick another"
 fi
@@ -193,7 +203,7 @@ warn "This takes several minutes; the tarball is around 500 MB."
 HOST_IP="$HOST_IP" DEVICE_IP="$DEVICE_IP" TELNET_PORT="$TELNET_PORT" \
 HTTP_PORT="$HTTP_PORT" ROOTFS_NAME="$(basename "$ROOTFS")" \
 BOOT_PARTITION="$BOOT_PARTITION" python3 - <<'PYEOF'
-import os, socket, sys, time
+import os, re, socket, sys, time
 
 HOST         = os.environ["DEVICE_IP"]
 PORT         = int(os.environ["TELNET_PORT"])
@@ -263,13 +273,26 @@ if "0" in body.split():
 
 # A busy /data means the recovery already tried to enter the installed system.
 # docs/flashing.md: stop, do not continue.
+# /init_enter_debug halts hybris init AFTER it has mounted userdata, leaving
+#     /dev/mmcblk0p54 on /target
+#     /dev/mmcblk0p54 on /target/data
+# Since /target is the same partition as /data, those mounts pin
+# /data/.stowaways/sailfishos and `rm -rf` fails with "Device or resource busy".
+# Rebooting the recovery does NOT help -- it lands in the same state again.
+#
+# Unmount /target* only. Never /data (the install writes there), and never
+# `echo umount_stowaways > /init-ctl/stdin`, which belongs to the mass-storage
+# workflow and would take userdata down.
+print("--> releasing leftover /target mounts")
+run("umount /target/data 2>/dev/null; umount /target 2>/dev/null; true")
+
 print("--> clearing any previous installation")
 body, status = run("rm -rf /data/.stowaways/sailfishos 2>&1; mkdir -p /data/.stowaways/sailfishos")
 if "resource busy" in body.lower() or "Device or resource busy" in body:
     raise SystemExit(
-        "ERROR: /data/.stowaways/sailfishos is busy -- the recovery has already tried to "
-        "boot the installed system.\n"
-        "       Reboot to fastboot, live-boot hybris-recovery.img again, and re-run."
+        "ERROR: /data/.stowaways/sailfishos is still busy after unmounting /target.\n"
+        "       Check `mount` on the recovery shell for anything else holding it.\n"
+        "       Do NOT run 'echo umount_stowaways > /init-ctl/stdin' -- it unmounts userdata."
     )
 
 # This recovery ships wget, not curl.
@@ -278,8 +301,16 @@ run(f"wget -O - {BASE}/{ROOTFS_NAME} | tar -xj -C /data/.stowaways/sailfishos", 
     quiet=True)
 
 # Verify before touching the boot partition. A failed extraction leaves only "data".
+#
+# `ls` in this recovery is aliased to colourise, so the names come back wrapped in
+# SGR escapes ("\x1b[1;34mbin\x1b[m"). Comparing those against plain strings makes
+# every name "missing" and aborts a perfectly good install -- which happened. Use
+# `ls -1 --color=never` AND strip escapes anyway, since busybox ls does not always
+# honour --color=never.
 print("--> verifying the extracted rootfs")
-body, _ = run("ls /data/.stowaways/sailfishos")
+body, _ = run("ls -1 --color=never /data/.stowaways/sailfishos 2>/dev/null || "
+              "ls -1 /data/.stowaways/sailfishos")
+body = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", body)
 present = set(body.split())
 missing = {"bin", "etc", "usr", "var", "lib"} - present
 if missing:
@@ -290,12 +321,40 @@ if missing:
     )
 print("    rootfs looks sane")
 
+# Stage the boot image on /data, NOT /tmp. /tmp is a small RAM-backed tmpfs in this
+# recovery and the 12 MB image does not reliably fit: wget reports success-ish and
+# the file is simply absent, so the following dd dies with
+#     dd: can't open '/tmp/hybris-boot.img': No such file or directory
 print("--> fetching hybris-boot.img")
-run(f"wget -O /tmp/hybris-boot.img {BASE}/hybris-boot.img", quiet=True)
-body, _ = run("ls -l /tmp/hybris-boot.img")
+run(f"wget -O /data/hybris-boot.img {BASE}/hybris-boot.img", quiet=True)
+body, _ = run("ls -l /data/hybris-boot.img")
+if "No such file" in body:
+    raise SystemExit("ERROR: hybris-boot.img did not download to /data -- check the http server.")
+
+src_md5 = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", run("md5sum /data/hybris-boot.img")[0]).split()
+src_md5 = next((t for t in src_md5 if len(t) == 32 and all(c in "0123456789abcdef" for c in t)), None)
 
 print(f"--> writing hybris-boot.img to {BOOT_PART}")
-run(f"dd if=/tmp/hybris-boot.img of={BOOT_PART}")
+# bs=512 so the count is exact and the readback below can be sized precisely.
+run(f"dd if=/data/hybris-boot.img of={BOOT_PART} bs=512")
+run("sync")
+
+# Read the partition back and compare. dd onto a raw node can fail silently on a
+# full or flaky eMMC, and a bad boot partition means a device that will not come up.
+if src_md5:
+    size, _ = run("wc -c < /data/hybris-boot.img")
+    size = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", size)
+    blocks = next((int(t) // 512 for t in size.split() if t.isdigit()), 0)
+    if blocks:
+        back = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "",
+                      run(f"dd if={BOOT_PART} bs=512 count={blocks} 2>/dev/null | md5sum")[0])
+        if src_md5 not in back:
+            raise SystemExit(
+                f"ERROR: boot partition readback does not match the image ({src_md5}).\n"
+                "       Do NOT reboot; re-run the flash."
+            )
+        print(f"    boot partition verified ({src_md5})")
+run("rm -f /data/hybris-boot.img")
 run("sync")
 
 print("--> rebooting")
