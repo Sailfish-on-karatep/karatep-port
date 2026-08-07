@@ -19,6 +19,83 @@
 > Read this document first anyway — it explains what each step does and how to recover when
 > one of them fails.
 
+## Two ways to install
+
+| | |
+|---|---|
+| **Flashable zip, from the LineageOS recovery** | The standard Android mechanism. Requires the recovery from [`los-recovery.md`](los-recovery.md) and a **signed** zip. Described immediately below. |
+| **Manual install, over the recovery shell** | The HADK's own *Manual Installation and Maintenance* procedure: extract the rootfs tarball to `/data/.stowaways/sailfishos` and `dd` the boot image. Works from either recovery. Described from [§1](#1-boot-the-sailfish-recovery) onward, and automated by [`scripts/flash.sh`](../scripts/flash.sh). |
+
+TWRP is not usable on this device: it is 32-bit and fails the Sailfish
+installer with Error 11 / Error 1.
+
+---
+
+## Installing the flashable zip
+
+### Sign it first
+
+`mic` emits the zip unsigned, and the recovery refuses an unsigned package:
+
+```
+Footer is wrong
+Signature verification failed
+Installation aborted.       (error 21 = kZipVerificationFailure)
+```
+
+This is a recurring porter problem — the same message appears in the
+`#sailfishos-porters` archive in 2015, 2016, 2022 and 2025 — because TWRP has
+zip signature verification **off** by default and hybris zips were never
+signed. The LineageOS recovery always verifies.
+
+```sh
+bin/sign-installer-zip.sh
+```
+
+That whole-file signs with `build/make/target/product/security/testkey`, which
+is one of the two certificates the recovery already trusts (the recovery's
+`/system/etc/security/otacerts.zip` holds `testkey.x509.pem` and
+`lineage.x509.pem`). The signed zip lands in `/opencloud/prebuilts/installer/`.
+On success the device logs:
+
+```
+I:2 key(s) loaded from /system/etc/security/otacerts.zip
+Verifying update package...
+I:whole-file signature verified against RSA key 0
+Update package verification took 26.1 s (result 0).
+```
+
+### Flash it
+
+```sh
+fastboot boot /opencloud/prebuilts/recovery/recovery.img
+```
+
+Then either pick *Apply update* → *Apply from ADB* on screen, or arm it from the
+host — see [`los-recovery.md`](los-recovery.md#entering-sideload-mode-without-the-screen):
+
+```sh
+adb shell 'mount /cache; mkdir -p /cache/recovery; echo "--sideload" > /cache/recovery/command'
+adb shell 'pkill -f /system/bin/recovery'
+adb sideload /opencloud/prebuilts/installer/sailfishos-karatep-release-<version>-signed.zip
+```
+
+The zip mounts `/data`, copies the rootfs tarball to
+`/data/sailfishos-rootfs.tar.bz2`, extracts it to `/data/.stowaways/sailfishos`
+via `updater-unpack.sh`, then writes `hybris-boot.img` to
+`/dev/block/bootdevice/by-name/boot`.
+
+### If it fails
+
+| Message | Cause |
+|---|---|
+| `Footer is wrong` / `Signature verification failed` | The zip is unsigned. Run `bin/sign-installer-zip.sh`. |
+| `Failed to extract filesystem!` | The recovery has no `bzip2` — see [`los-recovery.md`](los-recovery.md#bzip2). |
+| `killed by signal 11` right after `Installing update...` | The zip's `update-binary` was built from the hybris-patched tree — see [`rca/broken-update-binary.md`](rca/broken-update-binary.md). |
+| `Failed to start fuse` | A stale `/sideload` mount from a killed sideload: `adb shell umount -l /sideload`. |
+
+---
+
 ## Prerequisites
 
 ### Android Base

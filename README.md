@@ -90,6 +90,7 @@ SIM 2 are parked until a real SIM is available.
 | Path | What it is |
 |---|---|
 | [`docs/flashing.md`](docs/flashing.md) | **Start here to install.** Step-by-step flashing guide, plus troubleshooting for the errors this device actually produces. |
+| [`docs/los-recovery.md`](docs/los-recovery.md) | The LineageOS recovery this port builds and uses: how it is built, the karatep changes it carries, and the traps it hides. |
 | [`docs/porting-notes.md`](docs/porting-notes.md) | Accumulated device knowledge: partition map, fixes already in the tree, known workarounds, how to debug the boot. |
 | [`docs/rca/`](docs/rca/) | Root-cause write-ups for bugs that were properly diagnosed. |
 | [`docs/hadk-compliance.md`](docs/hadk-compliance.md) | Chapter-by-chapter audit of this port against the HADK: what complies, what was fixed, and which deviations are deliberate. |
