@@ -23,14 +23,9 @@
 		name="Sailfish-on-karatep/droid-hal-version-karatep" revision="hybris-18.1" />
 
 	<!--
-	  hybris-boot: karatep fork, following the HADK's "Contribute your mods back"
-	  pattern (fork the repo, commit, replace the project line here).
-
-	  It carries one commit on top of upstream master: the karatep entry in
-	  fixup-mountpoints, which maps /dev/block/bootdevice/by-name/* to the raw
-	  mmcblk nodes. Without it hybris-boot aborts with "does not have mountpoint
-	  fixup data". No mer-hybris hybris-patch touches hybris-boot, so a fork is
-	  the right mechanism here and no patch is involved.
+	  hybris-boot: karatep fork, carrying the fixup-mountpoints entry for this
+	  device. Without it hybris-boot aborts with "does not have mountpoint fixup
+	  data". No hybris-patch touches this project, so a fork is the mechanism.
 	-->
 	<remove-project name="mer-hybris/hybris-boot" />
 	<project path="hybris/hybris-boot"
@@ -39,35 +34,17 @@
 	<!--
 	  karatep-patches: the four Android-source patches that cannot be carried as
 	  a fork, because they are written against the tree *after* mer-hybris'
-	  patch series has been applied. Verified: against a pristine LineageOS
-	  hybris-18.1 tree, system/core/0040 and bionic/0009 both fail to apply.
-
-	  mer-hybris/hybris-patches is deliberately NOT overridden - it is synced
-	  normally from the default manifest. Apply order (both invoked with the
-	  git-am flag, spelled with two leading dashes which cannot appear inside an
-	  XML comment):
-
-	      1. hybris-patches/apply-patches.sh      upstream, first
-	      2. karatep-patches/apply-patches.sh     ours, on top
+	  series (system/core/0040 and bionic/0009 do not apply before it).
+	  hybris-patches is therefore synced normally, and applied first.
 	-->
 	<project path="karatep-patches"
 		name="Sailfish-on-karatep/karatep-patches" revision="hybris-18.1" />
 
 	<!--
-	  hardware/lineage/interfaces: karatep fork, same "Contribute your mods
-	  back" pattern as hybris-boot above.
-
-	  It carries one commit: the fingerprint 2.0 HIDL adapter must accept a
-	  vendor library that returns a template count where fingerprint.h
-	  specifies 0. FPC's library does exactly that, so ErrorFilter() turned
-	  successful set_active_group() and enumerate() calls into SYS_UNKNOWN and
-	  enumerate() never synthesised its onEnumerate callbacks. With no template
-	  ids reaching the client, remove() could not address the right template:
-	  deleting a fingerprint appeared to work and the template survived, so a
-	  deleted finger still unlocked the device and reappeared at the next boot.
-
-	  No mer-hybris hybris-patch touches this project, so a fork is the right
-	  mechanism and no patch is involved.
+	  hardware/lineage/interfaces: karatep fork of the fingerprint 2.0 HIDL
+	  adapter, so that a vendor library returning a template count where
+	  fingerprint.h specifies 0 is not treated as an error. Without it no
+	  template id reaches the client and removals cannot be targeted.
 	-->
 	<remove-project name="LineageOS/android_hardware_lineage_interfaces" />
 	<project path="hardware/lineage/interfaces"
@@ -75,22 +52,10 @@
 		revision="hybris-18.1" />
 
 	<!--
-	  Drop the Chromium WebView patches project.
-
-	  LineageOS' manifest (snippets/lineage.xml) declares
-
-	      <linkfile src="Android.mk" dest="external/chromium-webview/Android.mk" />
-
-	  but the patches repo no longer ships Android.mk - it was renamed to
-	  os_pickup.mk upstream. repo therefore creates a DANGLING symlink at
-	  external/chromium-webview/Android.mk, which ckati then tries to read:
-
-	      build/make/core/prebuilt.mk:53: error:
-	          external/chromium-webview/Android.mk: No such file or directory
-
-	  and the whole hybris-hal build dies. Sailfish OS never builds or ships
-	  Android's WebView (the prebuilt webview projects are commented out in
-	  lineage.xml too), so the cleanest fix is not to sync the project at all.
+	  Drop the Chromium WebView patches project. LineageOS' manifest linkfiles
+	  external/chromium-webview/Android.mk, which the patches repo no longer
+	  ships, so repo leaves a dangling symlink and ckati kills the hybris-hal
+	  build on it. Sailfish never builds Android's WebView anyway.
 	-->
 	<remove-project name="LineageOS/android_external_chromium-webview_patches" />
 </manifest>

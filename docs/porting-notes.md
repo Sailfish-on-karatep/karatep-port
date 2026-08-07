@@ -47,6 +47,13 @@ instructions use raw `mmcblk0p*` nodes.
   [rca/vndservicemanager-libbinder.md](rca/vndservicemanager-libbinder.md). Fixed properly by
   the `karatep-patches` `system/core/0040..0042`; the older advice to "apply the linkerconfig patch" only
   addressed half of it.
+* **`TLS_SLOT_ART_THREAD_SELF` needs a value.** mer-hybris' slot-shifting patch leaves the
+  macro empty, but ART's headers (`thread-current-inl.h`, `thread.cc`, `thread_list.cc`) expand
+  it and Soong pulls parts of `art/` into the hybris-hal build, so the tree fails to compile
+  with *"expected expression"*. `karatep-patches` `bionic/0009` aliases it to
+  `TLS_SLOT_SANITIZER` (7). That is an alias, not a spare slot; it is only safe because ART is
+  never *executed* on a Sailfish port — there is no zygote and no app process. Revisit if that
+  ever changes, because `Thread::Current()` and the sanitizer slot would collide.
 * **Chromium WebView is not synced.** LineageOS' manifest links `patches/Android.mk`, which no
   longer exists upstream, leaving a dangling symlink that kills the build with
   `build/make/core/prebuilt.mk:53: error: external/chromium-webview/Android.mk: No such file
@@ -1030,6 +1037,43 @@ up daemon-side changes.
 > Debugging any of this is hampered by journald's tiny retention on this device — `Logs begin at`
 > is routinely only a couple of minutes back, so the boot-time fpd log is gone before you look.
 > Raise it before investigating.
+
+---
+
+## Notification LED
+
+karatep has **one white LED**, which the kernel exposes as `/sys/class/leds/green` — PMI8950
+MPP2 in PWM mode, `qcom,led_mpp_2` in
+`arch/arm/boot/dts/qcom/karate-common/msm8937-lenovo-common.dtsi`. A second node, `red`, exists
+under the charger PMIC (`/sys/devices/soc/qpnp-smbcharger-17/leds/red`) but drives no physical
+LED.
+
+`mce-plugin-libhybris` probes its sysfs backends in a fixed order, and the **`redgreen`** backend
+— whose probe list is exactly `/sys/class/leds/red` + `/sys/class/leds/green` — is tried before
+`white`. Both directories exist here, so autoprobe always matched `redgreen`, which maps pattern
+colours through
+
+```c
+if (r || g) { red = r; green = g; } else { red = b; green = b; }
+```
+
+Any pattern with red set and green clear therefore drove only the phantom node and left the real
+LED dark — including `PatternCommunication` (`ff00ff`), the generic "you have a notification"
+pattern, plus `PatternPowerOff` and `PatternWebcamActive`.
+
+`sparse/etc/mce/60-karatep-led.ini` pins the `white` backend to the green node. It maps colour as
+`max(r,g,b)`, so every pattern lights the LED, and it sets `can_breathe = true`, so mce blinks in
+software — the LED's `pwm_us` node returns `EIO` on read and is not needed; a plain `brightness`
+write is enough.
+
+The LED is also driven harder than Lenovo shipped it. The MPP sink is three bits, 5–40 mA in
+5 mA steps (`QPNP_PIN_CS_OUT_5MA..40MA` in `include/linux/qpnp/pin.h`; Qualcomm's PMIC GPIO/MPP
+guide 80-NV610-48 documents the same peripheral). The stock 5 mA is the lowest level the hardware
+has and is barely visible indoors, so the dtsi now sets `qcom,current-setting = <30>` — a 6x
+continuous sink, since mce holds `PatternDeviceOn` at full duty while the display is off — and
+`qcom,max-current = <40>`, the true hardware ceiling. `max-current` is only range-checked for MPP
+LEDs (`qpnp_mpp_init`) and does not feed `cdev.max_brightness` in PWM mode; that comes from
+`MPP_MAX_LEVEL`.
 
 ---
 
