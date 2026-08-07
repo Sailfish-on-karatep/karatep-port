@@ -1,46 +1,22 @@
 #!/usr/bin/env python3
 """Generate hybris-boot's bootsplash.gz for this device's framebuffer.
 
-The splash is a raw framebuffer dump -- no image format, no scaling, and no
-error if it does not fit. On karatep it is displayed by hybris-boot's fbsplash
-helper (hybris/hybris-boot/fbsplash.c), which reads it on stdin:
+The splash is a raw framebuffer dump -- no image format, no scaling, no error
+if it does not fit. On karatep it is displayed by hybris-boot's fbsplash helper
+(hybris/hybris-boot/fbsplash.c) reading it on stdin, not by upstream's
+`zcat /bootsplash.gz > /dev/fb0`, which fails with ENODEV on this panel.
 
-    zcat /bootsplash.gz | /bin/fbsplash
-
-NOT by upstream's `zcat /bootsplash.gz > /dev/fb0`, which on this panel always
-fails with ENODEV. See fbsplash.c for why.
-
-Two things about the geometry are easy to get wrong:
-
-  * STRIDE, not width. The line length is /sys/class/graphics/fb0/stride, which
-    on karatep is 4352 bytes = 1088 pixels, while only 1080 are visible. Writing
-    1080*4 bytes per line shears the image diagonally.
-  * virtual_size is double-buffered (1080,3840 = 1920*2). Only the first 1920
-    lines are on screen, and fbsplash pans explicitly to that first buffer, so
-    ONE screen of image data is all that is needed (--buffers 1, the default).
-    The old redirect had to duplicate the frame into both buffers because it
-    could not choose which one was live.
-
-Read the real values from the device rather than trusting these defaults:
+Geometry comes from the device, so check it rather than trusting the defaults:
 
     cat /sys/class/graphics/fb0/{virtual_size,stride,bits_per_pixel}
 
-...and confirm them against what fbsplash logs to /init.log on the way past:
+Lines are STRIDE bytes, not width*4 (4352 vs 4320 here, or the image shears),
+and virtual_size is double-buffered -- fbsplash pans to the first buffer, so
+one screen of data is enough. The framebuffer is 32bpp B,G,R,X on MDSS.
 
-    fbsplash: fb0 xres=1080 yres=1920 yres_virtual=3840 bpp=32 \
-              line_length=4352 smem_len=16711680
-
-INK
----
-assets/sfosboot.png is the official Sailfish wordmark: BLACK artwork on a
-TRANSPARENT background. Compositing that onto a black splash would produce a
-black rectangle, so the default (--ink white) ignores the artwork's own colour
-and uses its alpha channel as ink coverage, painted white on black. That keeps
-the anti-aliasing -- a half-covered pixel becomes mid-grey -- and is what a boot
-logo wants. Pass --ink source for artwork that already carries the colours it
-should be shown in.
-
-The framebuffer is 32bpp B,G,R,X on MDSS; the byte order is handled below.
+--ink white (the default) uses the artwork's alpha as ink coverage painted
+white on black, which is what assets/sfosboot.png needs: it is black artwork on
+a transparent background. --ink source keeps the artwork's own colours.
 
 Usage:
     make-bootsplash.py [-o bootsplash.gz] [-i assets/sfosboot.png]
@@ -146,12 +122,8 @@ def main():
     frame = build(a.image, a.width, a.height, a.stride, a.ink,
                   a.fit_width, a.fit_height, a.center_y, a.preview)
 
-    # virtual_size on karatep is 1080,3840 -- two 1920-line buffers. fbsplash
-    # sets fb_var_screeninfo.yoffset = 0 before FBIOPAN_DISPLAY, which is what
-    # MDP uses to locate the pipe's source buffer, so buffer 0 is always the
-    # live one and a single screen is enough. (Duplicating the frame into both
-    # buffers was needed only for the old `zcat > /dev/fb0` redirect, which
-    # always landed at offset 0 with no say in which buffer was displayed.)
+    # fbsplash pans to buffer 0 before drawing, so one screen is enough even
+    # though virtual_size covers two.
     raw = frame * a.buffers
 
     expected = a.stride * a.height * a.buffers

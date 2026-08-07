@@ -124,15 +124,10 @@ say "Host address on the USB link: $HOST_IP"
 
 # ------------------------------------- make sure we got the PRE-switch_root shell
 #
-# If a Sailfish rootfs is already installed, hybris init finds /target and
-# switch_root's straight into it, even when booted from hybris-recovery.img. You
-# then get the post-switch_root shell on 2323 instead of the installer shell on 23,
-# and /data/.stowaways/sailfishos is busy so nothing can be replaced.
-#
-# hybris-boot's own escape hatch (init-script: "[ -f /target/init_enter_debug ]")
-# is to drop a flag file in the installed rootfs, which makes init halt *before*
-# switch_root. Set it via the 2323 shell, bounce to fastboot and re-boot the
-# recovery, and port 23 appears.
+# With a rootfs already installed, hybris init switch_root's into it even from
+# hybris-recovery.img, and only the post-switch_root shell (2323) answers.
+# Dropping /target/init_enter_debug over that shell makes init halt before the
+# switch_root, so port 23 comes back after a bounce through fastboot.
 port_open() { timeout 3 bash -c "echo > /dev/tcp/$DEVICE_IP/$1" 2>/dev/null; }
 
 if ! port_open "$TELNET_PORT"; then
@@ -232,14 +227,11 @@ def drain(seconds=2.0):
 
 
 def run(cmd, settle=2.0, quiet=False):
-    """Run one command, return its output. Uses a sentinel so we know it finished.
+    """Run one command and return its output, waiting on a completion sentinel.
 
-    The sentinel is sent SPLIT ("__done""_123__") so the literal string only ever
-    appears in the command's *output*, never in the shell's echo of the input
-    line. Matching the echo instead of the output is a trap: the wait returns
-    instantly, and the next command then runs while this one is still going --
-    which previously made the rootfs check read wget's progress bar and report a
-    corrupt extraction.
+    The sentinel is sent split ("__done""_123__") so it only ever appears in the
+    output, not in the shell's echo of the input line -- matching the echo returns
+    instantly and lets the next command run while this one is still going.
     """
     tag = time.time_ns()
     marker = "__done_%d__" % tag
@@ -271,18 +263,10 @@ body, _ = run("mount | grep -c mmcblk0p54")
 if "0" in body.split():
     raise SystemExit("ERROR: /data (mmcblk0p54) is not mounted; reboot into a fresh recovery")
 
-# A busy /data means the recovery already tried to enter the installed system.
-# docs/flashing.md: stop, do not continue.
-# /init_enter_debug halts hybris init AFTER it has mounted userdata, leaving
-#     /dev/mmcblk0p54 on /target
-#     /dev/mmcblk0p54 on /target/data
-# Since /target is the same partition as /data, those mounts pin
-# /data/.stowaways/sailfishos and `rm -rf` fails with "Device or resource busy".
-# Rebooting the recovery does NOT help -- it lands in the same state again.
-#
-# Unmount /target* only. Never /data (the install writes there), and never
-# `echo umount_stowaways > /init-ctl/stdin`, which belongs to the mass-storage
-# workflow and would take userdata down.
+# /init_enter_debug halts init after userdata is mounted, so /target and
+# /target/data pin the same partition as /data and `rm -rf` gets EBUSY. Unmount
+# /target* only: never /data, and never `echo umount_stowaways > /init-ctl/stdin`,
+# which belongs to the mass-storage workflow and takes userdata down.
 print("--> releasing leftover /target mounts")
 run("umount /target/data 2>/dev/null; umount /target 2>/dev/null; true")
 
@@ -300,13 +284,9 @@ print(f"--> extracting {ROOTFS_NAME} (several minutes)")
 run(f"wget -O - {BASE}/{ROOTFS_NAME} | tar -xj -C /data/.stowaways/sailfishos", settle=5.0,
     quiet=True)
 
-# Verify before touching the boot partition. A failed extraction leaves only "data".
-#
-# `ls` in this recovery is aliased to colourise, so the names come back wrapped in
-# SGR escapes ("\x1b[1;34mbin\x1b[m"). Comparing those against plain strings makes
-# every name "missing" and aborts a perfectly good install -- which happened. Use
-# `ls -1 --color=never` AND strip escapes anyway, since busybox ls does not always
-# honour --color=never.
+# Verify before touching the boot partition: a failed extraction leaves only
+# "data". `ls` here colourises, and busybox does not always honour
+# --color=never, so strip the SGR escapes before comparing names.
 print("--> verifying the extracted rootfs")
 body, _ = run("ls -1 --color=never /data/.stowaways/sailfishos 2>/dev/null || "
               "ls -1 /data/.stowaways/sailfishos")
@@ -321,10 +301,8 @@ if missing:
     )
 print("    rootfs looks sane")
 
-# Stage the boot image on /data, NOT /tmp. /tmp is a small RAM-backed tmpfs in this
-# recovery and the 12 MB image does not reliably fit: wget reports success-ish and
-# the file is simply absent, so the following dd dies with
-#     dd: can't open '/tmp/hybris-boot.img': No such file or directory
+# Stage on /data, not /tmp: /tmp is a small tmpfs here and the 12 MB image does
+# not reliably fit, leaving dd with nothing to open.
 print("--> fetching hybris-boot.img")
 run(f"wget -O /data/hybris-boot.img {BASE}/hybris-boot.img", quiet=True)
 body, _ = run("ls -l /data/hybris-boot.img")
