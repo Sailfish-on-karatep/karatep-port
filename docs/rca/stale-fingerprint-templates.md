@@ -103,6 +103,22 @@ Deleting `fpdata` from `updater-unpack.sh` was considered and rejected:
 
 The daemon-side fix covers every install path and needs no uid guessing.
 
+## Upstream
+
+Submitted to `sailfishos-open/sailfish-fpd-community` as three separate PRs,
+in merge order. Each is a self-contained fix; none rewrites an earlier one,
+though #42 and #43 build on the API #41 introduces.
+
+| PR | |
+|---|---|
+| [#41](https://github.com/sailfishos-open/sailfish-fpd-community/pull/41) | Only trust an enumeration that came back from the HAL |
+| [#42](https://github.com/sailfishos-open/sailfish-fpd-community/pull/42) | Confirm a removal before dropping the name |
+| [#43](https://github.com/sailfishos-open/sailfish-fpd-community/pull/43) | Do not adopt templates left by a previous installation |
+
+#41 also fixes a fault of its own: because an empty store could never be
+confirmed on a HAL that stays silent when it holds nothing, removing the *last*
+enrolled fingerprint always reported a failure although the template was gone.
+
 ## Scope
 
 This does **not** fix Settings → device reset, which erases nothing at all for
