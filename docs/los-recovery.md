@@ -21,11 +21,24 @@ Artefacts land in `/opencloud/prebuilts/recovery/`:
 | `recovery.img`, `recovery-<date>-<sha>.img` | the recovery |
 | `update-binary` | the updater, for `bin/install-clean-updater.sh` |
 
-Live-boot it. Do not flash it until you have decided to give up TWRP:
+This recovery is **installed on the device**, at `/dev/mmcblk0p35`. It replaced
+TWRP, which is 32-bit and cannot install a 64-bit Sailfish package.
+
+To try a new build without committing to it, live-boot instead of flashing:
 
 ```sh
 fastboot boot /opencloud/prebuilts/recovery/recovery.img
 ```
+
+To install one, from a booted Sailfish (verify the readback before rebooting):
+
+```sh
+dd if=recovery.img of=/dev/block/bootdevice/by-name/recovery bs=1M && sync
+head -c $(stat -c%s recovery.img) /dev/block/bootdevice/by-name/recovery | md5sum
+```
+
+`fastboot boot` still works and is the way back if an installed recovery ever
+breaks — the bootloader is unlocked.
 
 ### Why the tree is parked first
 
