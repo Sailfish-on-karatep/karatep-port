@@ -1069,11 +1069,54 @@ write is enough.
 The LED is also driven harder than Lenovo shipped it. The MPP sink is three bits, 5–40 mA in
 5 mA steps (`QPNP_PIN_CS_OUT_5MA..40MA` in `include/linux/qpnp/pin.h`; Qualcomm's PMIC GPIO/MPP
 guide 80-NV610-48 documents the same peripheral). The stock 5 mA is the lowest level the hardware
-has and is barely visible indoors, so the dtsi now sets `qcom,current-setting = <30>` — a 6x
-continuous sink, since mce holds `PatternDeviceOn` at full duty while the display is off — and
-`qcom,max-current = <40>`, the true hardware ceiling. `max-current` is only range-checked for MPP
-LEDs (`qpnp_mpp_init`) and does not feed `cdev.max_brightness` in PWM mode; that comes from
-`MPP_MAX_LEVEL`.
+has and is barely visible indoors, so the dtsi asks for `qcom,current-setting = <40>` and
+`qcom,max-current = <40>` — the top of the field and the most the hardware can do. `max-current`
+is only range-checked for MPP LEDs (`qpnp_mpp_init`) and does not feed `cdev.max_brightness` in
+PWM mode; that comes from `MPP_MAX_LEVEL`. The level actually driven is `current-setting`, written
+once to `LED_MPP_SINK_CTRL` at probe: `qpnp_mpp_set()` rewrites that register only in
+`MANUAL_MODE`, and this LED is in PWM mode, so the probe-time value stands. Read it back at
+`0x2A14C` (SID 2, base `0xa100` + `0x4C`); the field is `(mA / 5) - 1`, so 40 mA reads `0x07`.
+
+### The current setting is only half of it — mce throttles the LED by ambient light
+
+Raising the sink current alone does *not* make the LED bright, and this cost a full debugging
+round to find. mce scales every pattern colour by an ALS-derived level *before* it reaches the
+sysfs node — `sysfs_led_curr.level` in `sysfs-led-main.c`, fed from `[BrightnessLed]` in
+`/etc/mce/20als-defaults.ini`. That stock curve is written for a bright RGB indicator:
+
+```
+LevelsProfile0=6;8;9;11;12;13;15;16;18;19;20;28;36;44;52;60;68;76;84;92;100
+```
+
+It floors at **6%** in a dark room and gave only **40%** in ordinary room light. Measured peak on
+`/sys/class/leds/green` over a full breath cycle, sampled at ~150 Hz: **101/255 as shipped
+against 255/255 with the curve flattened.** The ALS curve was handing back most of what the sink
+current bought, and it — not the backend and not the current — was the dominant cause of "the LED
+is faint". `60-karatep-led.ini` therefore also carries a `[BrightnessLed]` section with a 50%
+floor, keeping the stock lux ladder and changing only the levels.
+
+Two traps when measuring this:
+
+- **Sample fast.** The patterns that breathe are at peak for an instant; a `sleep 1` loop reports
+  whatever part of the ramp it happens to land on and reads far too low. Take the max over a tight
+  loop spanning several full cycles.
+- **A steady pattern is the only fair test of peak brightness.** `PatternBatteryFull` is
+  500 ms on / 2500 ms off, so it looks dim however hard the LED is driven. Define a scratch
+  `PatternTestMax=5;5;0;0;0;ffffff` in an `/etc/mce/99-*.ini`, restart mce, and
+  `mcetool --activate-led-pattern=PatternTestMax`.
+
+**`PatternDeviceOn` does not light this LED.** It is configured (priority 254, steady, display-off
+only) and it looks like it should glow whenever the screen is off, but it does not: with the
+battery patterns disabled and the display off, the node measures a flat `0`. Do not "fix" it.
+`ircgrep.sh 'PatternDeviceOn'` returns zero hits across the whole porter archive, so there is no
+prior art either way — this is a measurement, not a citation.
+
+**The sink current cannot be tested live over SPMI debugfs.** `MSM_SPMI_DEBUGFS_RO` is `default y`
+in `drivers/platform/msm/spmi/Kconfig`, and it compiles the write handler out altogether
+(`spmi-dbgfs.c`, `#define spmi_dfs_reg_write NULL`). A `file_operations` with no `.write` fails
+with `EINVAL`, so `echo 0x07 > /sys/kernel/debug/spmi/spmi-0/data` reports *"Invalid argument"* —
+which looks like a bad write format or a bus permission problem and is neither. Reads work fine.
+Changing the sink therefore always costs a kernel rebuild and a reflash.
 
 ---
 
