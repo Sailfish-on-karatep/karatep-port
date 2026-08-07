@@ -1147,7 +1147,7 @@ Between the Lenovo bootloader logo and lipstick the screen is black for ~75 s, w
 hang. The obvious fix — hybris-boot's `HYBRIS_BOOTLOGO`, which makes the initrd run
 `zcat /bootsplash.gz > /dev/fb0` — **cannot work on this device**. The diagnosis is below; the
 implemented replacement is [`hybris-boot/fbsplash.c`](https://github.com/Sailfish-on-karatep/hybris-boot),
-where the same explanation is kept inline next to the code.
+which carries a short summary of it inline.
 
 **No upstream guidance exists.** The [HADK](https://hadk.sailfishos.org/) (all chapters),
 [`hadk-faq`](https://github.com/mer-hybris/hadk-faq) and
