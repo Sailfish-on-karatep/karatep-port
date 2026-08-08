@@ -52,6 +52,60 @@
 		revision="hybris-18.1" />
 
 	<!--
+	  external/bzip2: karatep fork adding recovery_available to the bzip2
+	  binary, which the recovery ramdisk needs. groups="pdk" matches the AOSP
+	  original's sync group.
+	-->
+	<remove-project name="platform/external/bzip2" />
+	<project path="external/bzip2"
+		name="Sailfish-on-karatep/android_external_bzip2"
+		revision="hybris-18.1" groups="pdk" />
+
+	<!--
+	  hardware/waydroid: karatep fork, so hwcomposer.waydroid.so can be rebuilt
+	  taking the wl_shell path instead of xdg-shell. Waydroid prefers xdg-shell
+	  whenever the compositor advertises xdg_wm_base, and lipstick started doing
+	  so in Sailfish OS 5.1 with a deliberately partial implementation on which
+	  our surfaces render but never receive touch. See
+	  karatep-port/docs/rca/waydroid-touch-xdg-shell.md.
+
+	  This is the lineage-18.1 branch because the installed Waydroid *vendor*
+	  image is HALIUM_11 (Android 11), the same API level as this tree, which
+	  is why the module builds here at all. The rebuilt library is installed
+	  through Waydroid's overlay, not by rebuilding the image.
+	-->
+	<project path="hardware/waydroid"
+		name="Sailfish-on-karatep/android_hardware_waydroid"
+		revision="hybris-18.1" />
+
+	<!--
+	  external/minigbm: repinned to Waydroid's fork, which defines the
+	  minigbm_headers header library that hwcomposer.waydroid depends on. AOSP's
+	  copy does not. Nothing in the karatep device build uses minigbm, so this
+	  swap is inert outside the Waydroid module. groups="pdk" matches the AOSP
+	  original's sync group.
+	-->
+	<remove-project name="platform/external/minigbm" />
+	<project path="external/minigbm"
+		name="waydroid/android_external_minigbm"
+		revision="lineage-18.1" groups="pdk" />
+
+	<!--
+	  external/libdrm: repinned to Waydroid's fork for the same reason. Their
+	  minigbm's libgbm depends on a libdrm_headers header library that AOSP's
+	  libdrm does not define, and an undefined dependency is a hard Soong
+	  analysis error for the whole tree, not just for the module that wants it.
+	  The fork is a superset: it still provides libdrm, so anything else
+	  resolving that name is unaffected, and the karatep device build does not
+	  use this project at all (its only libdrm references are the unrelated
+	  proprietary libdrmfs/libdrmtime blobs).
+	-->
+	<remove-project name="platform/external/libdrm" />
+	<project path="external/libdrm"
+		name="waydroid/android_external_libdrm"
+		revision="lineage-18.1" groups="pdk" />
+
+	<!--
 	  Drop the Chromium WebView patches project. LineageOS' manifest linkfiles
 	  external/chromium-webview/Android.mk, which the patches repo no longer
 	  ships, so repo leaves a dangling symlink and ckati kills the hybris-hal
