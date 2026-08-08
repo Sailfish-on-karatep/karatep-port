@@ -15,13 +15,14 @@ Note / Plus — Qualcomm **MSM8937** (Snapdragon 430), Adreno 505 — built on t
 
 ### Currently working on
 
-Camera video-mode crash, power management, and the unclean shutdown. Mobile data, calls/SMS and
-SIM 2 are parked until a real SIM is available.
+Power management and the unclean shutdown. Mobile data, calls/SMS and SIM 2 are parked until a
+real SIM is available.
 
 ### Recently fixed
 
 | | |
 |---|---|
+| **The camera died the moment video recording started** | Two stacked faults. With no `jolla-camera-hw.txt` on this port the app picked the largest size the HAL advertises — 3840x2160 — which no encoder here can take: `media_codecs.xml` caps the hardware AVC encoder at 1920x1088 and the Codec2 fallback returns `-EINVAL`, so `droidcamsrc` failed inside `DroidMediaRecorder` and the buffer queue stalled. It never *recovered* for an unrelated reason: `minimediaservice` waits forever for `media.audio_flinger`, a binder service Sailfish does not have, and since `CameraService` is hosted in that same process its binder threads parked and every later camera call queued behind them. Fixed by capping video at 1080p and requiring `audiosystem-passthrough-dummy-af`. Both cameras verified recording 1080p H.264 + AAC on hardware. → [full analysis](docs/rca/camera-dies-on-record.md) |
 | **Enrolled fingerprints "lost" after a reboot; re-enrolment errors out** | karatep's FPC HAL fails `enumerate()` precisely when templates exist — the vendor library returns the count and the HIDL service treats non-zero as an error. The daemon therefore never loaded its finger map and reported nothing enrolled, while the TEE still held the templates, so re-enrolling the same finger was refused with `do_enroll finger already enrolled`. Nothing was ever lost. Fixed in the `sailfish-fpd-community` fork; `GetAll` returns both fingers again. → [details](docs/porting-notes.md#enrolled-fingerprints-vanish-after-a-reboot-and-re-enrolment-fails) |
 | **No audio at all, on any output, plus no microphone** | Three independent faults stacked. A 21-byte `xpolicy.conf.d/fmradio.conf` stub broke `module-policy-enforcement`, so with `arm_droid_default.pa` defaulting to `sink.null`/`source.null` nothing was ever routed off them. This HAL has no `create_audio_patch`, so routing changes after stream open failed with `-ENOSYS` and streams stayed on the device they opened with — which is why only the loudspeaker ever worked. And the vendor policy config omits the built-in mics from the `primary input` route, so capture was opened as `AUDIO_SOURCE_VOICE_CALL` and refused. Loudspeaker, earpiece, 3.5 mm and all mics verified on hardware; Fluence dual-mic noise suppression enabled (+21 dB SNR, measured). → [details](docs/porting-notes.md#audio) |
 | **Headset mic dead; 4-pole headsets seen as 3-pole** | The TS3A227E accessory-detection chip never ran a detection, so MBHC classified every headset as a headphone. An inherited LineageOS regression (`8d2f38f67c27`) had braced `-Wmisleading-indentation` around the wrong statements, leaving the `DET_TRIGGER` write unreachable after a `return`. → [details](docs/porting-notes.md#headset-detected-as-headphone-the-ts3a227e-never-ran-a-detection) |
@@ -47,8 +48,10 @@ SIM 2 are parked until a real SIM is available.
 | Display | ✅ | pixel ratio 1.6 |
 | Touch | ✅ | |
 | Graphics / UI | ✅ | `hwcomposer-2-1` + lipstick |
-| Cameras (front & rear) | ⚠️ | work, but flaky |
-| Camera flash | ❓ | untested |
+| Cameras — stills | ✅ | both cameras; full sensor resolution (rear 4632x3474 / 4320x2432, front 3264x2448 / 3264x1836) |
+| Cameras — video | ✅ | both cameras verified recording 1080p H.264 Baseline + AAC-LC 48 kHz stereo, decoded clean end to end. **Capped at 1080p deliberately** — the HAL offers 3840x2160 but the AVC encoder's real limit is 1920x1088. One rough edge left: the frame rate floats with exposure (12.5–16.7 fps measured indoors, 30 fps in good light) because nothing pins `preview-fps-range`, and the video track ends ~0.3–0.7 s before the audio track → [details](docs/rca/camera-dies-on-record.md) |
+| Camera flash / torch | ⚠️ | rear HAL advertises `off, auto, on, torch` and `CameraService` torch state changes were observed on hardware; not yet verified against an actual exposure. Front camera has no flash — no `flash-mode-values` key at all |
+| Camera — other controls | ⚠️ | white balance (6 modes), exposure compensation and focus modes are read from the HAL and published to the UI; the front camera correctly offers no flash and no focus (`focus-mode-values=fixed`, `max-num-focus-areas=0`). **No ISO** — neither camera exposes an `iso-values` key, so there is nothing to publish. The HAL also reports `max-zoom=99` and `max-num-detected-faces-hw=10`, neither of which is wired up yet → [details](docs/porting-notes.md#camera) |
 | Audio — loudspeaker | ✅ | verified on hardware |
 | Audio — 3.5 mm | ✅ | verified, both channels; needs `use_legacy_stream_set_parameters` |
 | Audio — earpiece | ✅ | verified; no call needed, force `output-earpiece` via `output-parking` |

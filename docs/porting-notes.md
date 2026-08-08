@@ -1142,6 +1142,85 @@ up daemon-side changes.
 
 ---
 
+## Camera
+
+Stills, video and audio all work on both cameras. Video recording used to kill the camera
+outright — full analysis in [rca/camera-dies-on-record.md](rca/camera-dies-on-record.md); the
+short version is two stacked faults, a resolution the encoder cannot take and an unbounded wait
+on a binder service Sailfish does not have. Both fixes live in `droid-config-karatep`.
+
+### Read the HAL's parameters, don't guess them
+
+Every camera capability this port needs — resolution lists, flash modes, focus modes, white
+balance, the exposure range — is in the Android HAL's own parameter set, and `droidcamsrc` logs
+all of it:
+
+```sh
+GST_DEBUG=droidcamsrc:9 <pipeline> 2>&1 | grep "param .* = "
+```
+
+**`:9`, not `:5`.** The dump is a `GST_LOG ("param %s = %s", key, value)` in
+`gstdroidcamsrcparams.c`, and `GST_LOG` is level 9 — a lower threshold prints nothing and makes
+it look like the mechanism does not exist.
+
+`droid-camres`, the tool the HADK ecosystem points at for this, **does not work** — it checks
+`camera-device` with `G_IS_PARAM_SPEC_ENUM` while current gst-droid registers it as an int, so it
+exits with *"Camres error: Property camera-device is not an enum."* (`mlehtima/droid-camres`
+has a `multi-cam` branch that fixes it.) The `GST_DEBUG` route needs nothing installed.
+
+### What the two cameras actually report
+
+| | rear (`primary`) | front (`secondary`) |
+|---|---|---|
+| stills, 4:3 | 4632x3474 | 3264x2448 |
+| stills, 16:9 | 4320x2432 | 3264x1836 |
+| viewfinder | 1440x1080 / 1920x1080 | 1440x1080 / 1920x1080 |
+| video | **capped at 1920x1080** (HAL offers up to 3840x2160) | **capped at 1920x1080** |
+| flash | `off, auto, on, torch` | none — no `flash-mode-values` key |
+| focus | `infinity, auto, macro, continuous-video, continuous-picture` | `fixed`, `max-num-focus-areas=0` |
+| white balance | auto, sunlight, cloudy, shade, tungsten, fluorescent | same |
+| exposure comp | −12…+12, step 0.166667 | same |
+| ISO | **no `iso-values` key** — neither camera publishes one | same |
+| zoom | `max-zoom=99` | — |
+| face detection | `max-num-detected-faces-hw=10` | — |
+| video snapshot | `false` | `true` |
+
+These are transcribed into `droid-config-karatep`'s
+`sparse/etc/dconf/db/vendor.d/jolla-camera-hw.txt` as Qt enum values, not strings.
+
+### The encoder ceiling
+
+`/vendor/etc/media_codecs.xml` caps `OMX.qcom.video.encoder.avc` at
+`<Limit name="size" min="96x96" max="1920x1088" />`. That is the real limit.
+`/vendor/etc/media_profiles_V1_0.xml` **disagrees** — its `VideoEncoderCap` for h264 claims
+`maxFrameWidth="3840" maxFrameHeight="2160"` — and it is wrong. `VideoEncoderCap` is advisory,
+read only by the legacy `CamcorderProfile` path; `media_codecs.xml` is what the codec enforces.
+The `CamcorderProfiles` in that same file stop at `quality="1080p"`.
+
+### Recovering a wedged camera without a reboot
+
+```sh
+setprop ctl.restart qcamerasvr    # mm-qcamera-daemon
+setprop ctl.restart minimedia     # minimediaservice — CameraService lives here
+```
+
+Takes a couple of seconds and clears `CameraService::connect ... rejected (too many other
+clients connecting)` as well as a spinning `mm-qcamera-daemon`. Easy to provoke by `SIGKILL`ing
+a `gst-launch` probe mid-stream, since the client then never disconnects.
+
+### Still not right (does not block recording)
+
+* **Frame rate floats with exposure.** `preview-fps-range-values` includes `(7000,30000)` and
+  nothing pins it, so a clip shot indoors is genuinely 12.5–16.7 fps (measured: 45 frames at
+  60 ms, 23 at 80 ms) while a bright one is a clean 30.1 fps. The HAL does offer
+  `(30000,30000)`. Pinning it is a gst-droid / `gstdroidcamsrcquirks.conf` change.
+* **The video track ends before the audio track** — 5.095 s vs 5.760 s, 3.122 s vs 3.371 s. The
+  video EOS path truncates the tail.
+* `/etc/gst-droid/gstdroidcamsrcquirks.conf` does not exist on this port. gst-droid warns and
+  uses its defaults; harmless, but that is where any frame-rate pinning would go.
+
+---
+
 ## Notification LED
 
 karatep has **one white LED**, which the kernel exposes as `/sys/class/leds/green` — PMI8950
@@ -1539,7 +1618,7 @@ done | sort -u
   `wlan-module-load.service`. (`dev-binderfs.mount` also fails, but that is expected — binderfs
   is Linux 5.0+ and this kernel is 3.18; the legacy `/dev/{,hw,vnd}binder` nodes are correct.)
 * Mobile data does not work; SIM slot 2 reports "Network: Denied".
-* Cameras and RIL are flaky.
+* RIL is flaky. (Cameras are no longer — see [Camera](#camera).)
 
 ---
 
