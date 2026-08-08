@@ -1185,8 +1185,43 @@ has a `multi-cam` branch that fixes it.) The `GST_DEBUG` route needs nothing ins
 | face detection | `max-num-detected-faces-hw=10` | — |
 | video snapshot | `false` | `true` |
 
-These are transcribed into `droid-config-karatep`'s
-`sparse/etc/dconf/db/vendor.d/jolla-camera-hw.txt` as Qt enum values, not strings.
+**None of this needs transcribing into dconf**, and attempting to is a trap — see below.
+
+### Do not write a large `jolla-camera-hw.txt`
+
+Most ports carry a long `jolla-camera-hw.txt` with `[apps/jolla-camera/primary/image]` sections
+setting `imageResolution`, `viewfinderResolution`, `flashValues`, `whiteBalanceValues`,
+`focusDistanceValues`, `isoValues` and friends. **On the jolla-camera shipped with 5.1.0.11 none
+of that is read.** Checked three ways:
+
+* `src/settings.qml` in the installed package puts the per-mode `ConfigurationGroup` at
+  `position + "/" + captureMode`, where position is **`back`** or **`front`** — so
+  `primary`/`secondary` are dead section names before the keys inside them even matter. (Jolla's
+  own stock `/etc/dconf/db/vendor.d/jolla-camera.txt` still ships `primary`/`secondary`. It is
+  equally inert.)
+* That group declares only `iso`, `flash`, `exposureMode`, `meteringMode`, `timer` and
+  `aspectRatio`. Grepping every installed `.qml` for the resolution and `*Values` key names
+  returns nothing.
+* Live dconf agrees: the running app reads and writes `[back/image]` and `[back/video]`, and
+  never touches `[primary/*]`.
+
+Resolutions, flash modes, focus modes and white balance are all derived at **runtime** by
+`CameraConfigs` (`src/cameraconfigs.cpp`) from what QtMultimedia reports, then picked per aspect
+ratio in `CaptureView.qml`. The table above is therefore documentation of the hardware, not a
+transcription target.
+
+The one dconf input that does anything is the video cap:
+
+```
+[apps/jolla-camera]
+maxVideoResolution='1920x1080'
+```
+
+read in `cameraconfigs.cpp` as `MDConfItem("/apps/jolla-camera/maxVideoResolution")` and
+`.toString().split('x')` — hence a `'WIDTHxHEIGHT'` string, not a list. The matching
+`maxImageResolution` exists in jolla-camera upstream but is **absent from the build installed
+here**, so stills cannot be capped this way. They do not need to be: they already come out at
+full sensor size, confirmed on captures taken before any config file existed.
 
 ### The encoder ceiling
 

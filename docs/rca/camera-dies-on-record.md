@@ -106,15 +106,70 @@ the visible part of the bug.
 
 ### Fix
 
-`sparse/etc/dconf/db/vendor.d/jolla-camera-hw.txt`, capping video and the viewfinder at 1080p:
+`sparse/etc/dconf/db/vendor.d/jolla-camera-hw.txt`, in its entirety:
 
 ```
 [apps/jolla-camera]
 maxVideoResolution='1920x1080'
 ```
 
-Stills are left at each sensor's full resolution (rear 4632x3474 in 4:3, 4320x2432 in 16:9;
-front 3264x2448 / 3264x1836) — only video and the viewfinder are capped.
+`CameraConfigs` reads it in `cameraconfigs.cpp` and uses it to filter the resolution list the app
+will consider:
+
+```cpp
+QVariant value(MDConfItem("/apps/jolla-camera/maxVideoResolution").value());
+if (!value.isNull()) {
+    QStringList values = value.toString().split('x');
+    ...
+}
+for (const QSize resolution : recorder->supportedResolutions()) {
+    if (!maxVideoResolution.isValid() || (resolution.height() <= maxVideoResolution.height()
+                                          && resolution.width() <= maxVideoResolution.width())) {
+```
+
+— which is why the value is a `'WIDTHxHEIGHT'` string rather than a list.
+
+Stills are untouched and stay at each sensor's full resolution (rear 4632x3474, front
+3264x2448). They were already there before this file existed, which is the point of the next
+section.
+
+### One key, and no more than one — this was checked, not assumed
+
+The obvious thing to write here is the large `jolla-camera-hw.txt` that most ports carry, with
+`[apps/jolla-camera/primary/image]` sections setting `imageResolution`, `viewfinderResolution`,
+`flashValues`, `whiteBalanceValues`, `focusDistanceValues`, `isoValues` and so on, transcribed
+from the HAL dump. **That file would have been almost entirely inert**, and it is worth recording
+exactly why, because it looks correct and fails silently:
+
+* `src/settings.qml` in the installed jolla-camera builds the per-mode `ConfigurationGroup` path
+  as `position + "/" + captureMode`, where position is **`back`** or **`front`**. So
+  `primary`/`secondary` are dead section names regardless of their contents. Jolla's own stock
+  `/etc/dconf/db/vendor.d/jolla-camera.txt` still ships `primary`/`secondary` sections — they are
+  equally inert, which is exactly what makes copying the pattern so plausible.
+* That group declares only `iso`, `flash`, `exposureMode`, `meteringMode`, `timer` and
+  `aspectRatio`. Grepping every installed `.qml` for the resolution and `*Values` names returns
+  nothing at all.
+* Live dconf settles it: the running app reads and writes `[back/image]` and `[back/video]` and
+  never touches `[primary/*]`.
+* `exposureCompensationValues` *is* real, but it belongs to the **global** `[apps/jolla-camera]`
+  group (`settings.qml:83`, default `[4, 3, 2, 1, 0, -1, -2, -3, -4]`), not the per-mode ones.
+* `maxImageResolution` is read by upstream `cameraconfigs.cpp` but **does not exist in the build
+  installed here** — no such string in `libjollacameraplugin.so`. Stills cannot be capped this
+  way on 5.1.0.11.
+
+Everything else — resolutions, flash modes, focus modes, white balance — is derived at runtime by
+`CameraConfigs` from what QtMultimedia reports and chosen per aspect ratio in `CaptureView.qml`:
+
+```qml
+resolution: _pickResolution(CameraConfigs.supportedImageResolutions, Settings.aspectRatio)
+resolution: _pickResolution(CameraConfigs.supportedVideoResolutions, CameraConfigs.AspectRatio_16_9)
+```
+
+The independent check: photos taken **before** any `jolla-camera-hw.txt` existed on this device
+are already 4632x3474 (rear) and 3264x2448 (front) — full sensor size on a 16 MP and an 8 MP
+sensor. Nothing was being configured; the app was reading the hardware all along. The single
+thing it could not work out for itself is that the encoder is narrower than the ISP, and that is
+the one key this file supplies.
 
 ### Verified
 
@@ -286,8 +341,14 @@ GST_DEBUG=droidcamsrc:9 <pipeline> 2>&1 | grep "param .* = "
 ```
 
 Note **`:9`, not `:5`** — the parameter dump is `GST_LOG`, so anything below 9 shows nothing and
-looks like the mechanism does not exist. This is the whole basis of `jolla-camera-hw.txt`; do not
-transcribe values from another device's port.
+looks like the mechanism does not exist. It is the right way to learn what the hardware can do —
+just don't assume the answer belongs in dconf, per the section above.
+
+**Verify that a config key is actually read before believing it works.** Nothing warns you: dconf
+accepts any key you write, `dconf read` hands it back, and an app that never looks at it behaves
+exactly as if the value were wrong. The checks that settle it are cheap — grep the installed QML
+and `strings` the plugin `.so` for the key name, and diff `dconf dump /apps/<app>/` before and
+after using the feature to see which groups the app really writes.
 
 **`droid-camres` does not work.** It is the tool the HADK ecosystem points at for exactly this
 job, and it is broken against current gst-droid. `droid-camres` 1.2.3 checks the `camera-device`
