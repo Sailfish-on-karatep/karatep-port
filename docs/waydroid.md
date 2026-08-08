@@ -289,17 +289,35 @@ automatically after installing the RPMs.
 No fix has been published anywhere findable. The IRC archive's coverage appears to stop around
 2026-05-30, so later discussion may exist that is not greppable.
 
-Two things to try, neither verified:
+**Solved.** The cause is the shell protocol, not lipstick being broken in general.
 
-1. **`persist.waydroid.multi_windows`** — `waydroid prop set persist.waydroid.multi_windows true`.
-   This changes the surface path entirely and is what b100dian pointed piggz at.
-2. **`waydroid-runner`** — nested compositor rather than direct Lipstick rendering. If the
-   regression really is a Lipstick protocol change, the nested path may sidestep it. This is an
-   inference, not something any source states.
+Waydroid's Android-side client prefers xdg-shell whenever the compositor advertises
+`xdg_wm_base`, falling back to `wl_shell` only if it does not. Lipstick gained an xdg-shell
+implementation in [sailfishos/lipstick 4b9745ef](https://github.com/sailfishos/lipstick/commit/4b9745ef)
+("Add XDG shell support", 2026-03-30), which shipped in 5.1 — so from 5.1 Waydroid switched
+itself onto a path lipstick renders but does not route touch on. That commit says outright it
+implements "only the basic parts needed to show maximized toplevel windows and position popups".
 
-Read the forum report carefully before assuming the worst: *"no IP address assigned"* is exactly
-what a kernel missing `CONFIG_VETH` / `xt_CHECKSUM` produces, so that post may be two unrelated
-problems stacked. Our kernel has both.
+Isolated by comparing compositors rather than by reasoning. `scripts/waydroid/wlinfo.py` shows
+lipstick advertising `xdg_wm_base v6`, while `waydroid-runner`'s nested compositor is built on
+`libQt5Compositor.so.5`, which contains no xdg-shell at all and therefore cannot advertise it.
+Same client, same device, same seat, same container — touch works under the one that offers only
+`wl_shell`. That also corrects the folklore that `waydroid-runner` works *because* it is nested:
+the nesting is incidental, it works because its compositor is too old to speak xdg-shell.
+
+The fix is in our `android_hardware_waydroid` fork: do not bind `xdg_wm_base` unless
+`persist.waydroid.prefer_xdg_shell=true`, so the client takes the `wl_shell` path Sailfish speaks
+natively. Fractional scaling is gated the same way, since lipstick's scale override arrived with
+its xdg-shell work and applies to xdg surfaces.
+
+**Removing xdg-shell from lipstick is not an option**, tempting as it looks:
+[PR #68](https://github.com/sailfishos/lipstick/pull/68) added it specifically to run GTK apps
+under Flatpak, and the porter archive shows it had been wanted since 2019 and was blocked on Qt
+being too old. Disabling it would trade Waydroid for every foreign app on the platform.
+
+Read the earlier forum report carefully before assuming the worst: *"no IP address assigned"* is
+exactly what a kernel missing `CONFIG_VETH` / `xt_CHECKSUM` produces, so that post may be two
+unrelated problems stacked. Our kernel has both.
 
 ### What to capture when it fails
 
