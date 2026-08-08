@@ -4,11 +4,20 @@ Waydroid runs a full Android system in an LXC container and renders it through t
 Wayland compositor, reusing the device's own `/vendor` HALs over binder. It is the community
 alternative to Jolla's proprietary AlienDalvik.
 
-> **Status: installed and initialised on hardware; the container has not started yet.**
-> `waydroid init` succeeds and both images are in place, but the LXC container died on a
-> missing kernel option — see [`rca/waydroid-devpts.md`](rca/waydroid-devpts.md). The fix is
-> in the tree and awaiting a reflash. There is also a known Sailfish OS 5.1 regression — see
-> [The 5.1 problem](#the-51-problem) — which we have not reached yet.
+> **Status: running on hardware, with gaps.** The container boots Android, touch works, and it
+> survives a display-size change. Both cameras enumerate inside it and the camera app opens them.
+>
+> Getting here took four fixes: `CONFIG_DEVPTS_MULTIPLE_INSTANCES` for the container to start at
+> all ([rca](rca/waydroid-devpts.md)); taking the `wl_shell` path instead of xdg-shell, which is
+> what the 5.1 regression actually was ([rca](rca/waydroid-touch-xdg-shell.md)); `cgroup.clone_children`
+> so the container stops killing the *host's* camera ([rca](rca/waydroid-poisons-host-cgroups.md));
+> and staging the host's camera HAL under the name the container looks for
+> ([rca](rca/waydroid-camera-hal-name.md)).
+>
+> Still open: video recorded inside Waydroid does not play back, and `configureStreams` rejects
+> the JPEG stream — the install pairs a lineage-20 (Android 13) system image with a lineage-18.1
+> (Android 11) HALIUM_11 vendor, so an Android 13 framework is negotiating with a
+> `camera.device@3.3` HAL. GPS and vibration are wired but unverified.
 
 ---
 
