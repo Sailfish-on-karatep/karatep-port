@@ -54,9 +54,29 @@ waydroid"*, and the next day *"waydroid issue seems to be some protocol issue in
 new lipstick"*).
 
 So: before 5.1, lipstick advertised only `wl_shell`, and Waydroid took the
-`wl_shell` path that had worked for years. From 5.1, `xdg_wm_base` appears,
-Waydroid switches to it, and lands on lipstick's brand-new xdg path — which
-renders the surface but does not route touch to it.
+`wl_shell` path that had worked for years. From 5.1, `xdg_wm_base` appears and
+Waydroid switches to it.
+
+**What is proven is that the shell choice is the variable. Which side is at
+fault is not yet proven.** Lipstick's xdg implementation is deliberately partial
+— the commit says so: *"Implement only the basic parts needed to show maximized
+toplevel windows and position popups on the screen."* But it is not inert on
+input: measured against lipstick, an xdg toplevel is configured **and
+activated**:
+
+```
+xdg_toplevel.configure 1080x1920 states=[1, 4]     # 1 = MAXIMIZED, 4 = ACTIVATED
+```
+
+and the PR author notes that xdg popups "will receive focus via `focusOnTouch`",
+which means touch does reach xdg surfaces in their testing. Equally, Waydroid's
+own touch handler does not drop events: `display->layers` is a `std::map`
+indexed by `wl_surface*` and read with `operator[]`, so a missing entry
+default-constructs to offset 0,0 rather than causing an early return. The only
+early return is on a NULL surface.
+
+So the fault is somewhere in the interaction, and locating it needs a protocol
+trace of the real client, not more inference.
 
 ## Evidence
 
@@ -124,16 +144,44 @@ interaction between Lipstick and Waydroid", without naming the cause.
   `invalid arguments for wl_registry#2.bind`, which looks like a wire-format bug
   and is not one.
 
-## Fix
+## Why xdg_shell was added, and why it must not simply be removed
 
-Not yet applied — see the options and the reasoning in the status report. The
-shape of it is that lipstick must either stop advertising `xdg_wm_base` (which
-restores the exact pre-5.1 behaviour) or route input on its xdg path. Both are
-changes to lipstick, which is open source (`sailfishos/lipstick`), so this is
-reportable upstream with a precise root cause and a one-line reproduction:
+From the original PR ([#68](https://github.com/sailfishos/lipstick/pull/68), by
+affenull2345, superseded by [#69](https://github.com/sailfishos/lipstick/pull/69)):
 
-> A client that binds `xdg_wm_base` instead of `wl_shell` renders under lipstick
-> 5.1 but receives no `wl_touch` events.
+> *"Tested with `weston-demo` … and a few GTK-based apps via Flatpak."*
+
+xdg_shell exists in lipstick to run **foreign, non-Qt Wayland apps — GTK via
+Flatpak**. It is a deliberate feature with real users, not an accident. The
+porter archive shows this had been wanted for years, and that Qt could not
+provide it:
+
+| Date | Who | What |
+|---|---|---|
+| 2019-12-30 | r0kk3rz | *"i was thinking some kind of shim for the xdg-shell calls"* |
+| 2020-01-06 | r0kk3rz | *"i do wonder if we can hack in xdg-shell support into the flatpak-runner thing"* |
+| 2021-09-06 | deathmist | piggz *"tried but gave up … the OS Qt version is just too old … namely XDG-shell … it needs Qt 5.12"* |
+
+That last one also explains why `libQt5Compositor.so.5` has no xdg_shell at all,
+and therefore why lipstick had to hand-roll its own rather than use Qt's.
+
+**So "make lipstick stop advertising xdg_wm_base" is not a safe rollback.** It
+would restore Waydroid at the cost of every GTK/Flatpak app on 5.1. Rejected.
+
+The fix has to make Waydroid work *with* xdg_shell — either by correcting
+lipstick's xdg input path, or by adapting the Waydroid side, depending on where
+the trace lands.
+
+## Next measurement
+
+Everything above narrows the fault to the lipstick↔Waydroid xdg interaction
+without saying which side drops the touch. The decisive test is a Wayland
+protocol trace of the real client while the screen is touched: if lipstick never
+sends `wl_touch.down`, the fault is lipstick's; if it sends and Waydroid does not
+write the FIFO, the fault is Waydroid's.
+
+`mount_overlays = True` on this port, so the container's Android side can be
+instrumented through `/var/lib/waydroid/overlay/` without rebuilding any image.
 
 ## See also
 
