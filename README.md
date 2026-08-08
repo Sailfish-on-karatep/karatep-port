@@ -107,6 +107,7 @@ something is known to be broken.
 | [`docs/rca/waydroid-devpts.md`](docs/rca/waydroid-devpts.md) | Why the Waydroid container refused to start: `CONFIG_DEVPTS_MULTIPLE_INSTANCES`, plus the overlayfs limitation found alongside it. |
 | [`docs/rca/waydroid-poisons-host-cgroups.md`](docs/rca/waydroid-poisons-host-cgroups.md) | Why running Waydroid kills the Sailfish camera until the next reboot: the container writes the host's cgroup v1 cpuset hierarchy. |
 | [`docs/rca/waydroid-touch-xdg-shell.md`](docs/rca/waydroid-touch-xdg-shell.md) | Why Waydroid touch is dead under lipstick: SFOS 5.1 added xdg_shell, Waydroid prefers it over wl_shell, and lipstick's xdg path does not route touch. |
+| [`docs/rca/waydroid-camera-hal-name.md`](docs/rca/waydroid-camera-hal-name.md) | Why Waydroid's camera provider crash-looped every 5 s: the HAL is probed as camera.waydroid.so, not camera.qcom.so. |
 | [`docs/hadk-compliance.md`](docs/hadk-compliance.md) | Chapter-by-chapter audit of this port against the HADK: what complies, what was fixed, and which deviations are deliberate. |
 | [`docs/useful-commands.md`](docs/useful-commands.md) | Short command reference (rebooting to fastboot/recovery from Sailfish, etc.). |
 | [`manifests/local_manifests.xml`](manifests/local_manifests.xml) | The `repo` local manifest. Copy to `$ANDROID_ROOT/.repo/local_manifests/`. |
