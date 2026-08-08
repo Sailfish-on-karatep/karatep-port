@@ -33,6 +33,43 @@ installer with Error 11 / Error 1.
 
 ## Installing the flashable zip
 
+### Check the updater before you sign anything
+
+**This trap has now cost two full build-sign-sideload cycles. Check it every time.**
+
+The zip carries its own installer at `META-INF/com/google/android/update-binary`,
+which comes from `out/target/product/karatep/system/bin/updater`. The copy the
+**hybris-patched** tree builds is statically linked against patched bionic and
+cannot run on the LineageOS recovery — it dies the instant the recovery hands
+over, *after* the 26 s signature verification has already passed. So the zip
+looks perfectly good right up until the moment it cannot install.
+
+Any `make` regenerates the patched binary. `bin/install-clean-updater.sh` must
+therefore run **after the last Android build and before `build_packages.sh -d`**,
+because `-d` is what packages the updater into droid-hal.
+
+`bin/build-hal-packages.sh` does this in the right order — **use it**:
+
+```sh
+/opencloud/bin/sfossdk /opencloud/bin/build-hal-packages.sh   # clean updater, then -d and -c
+```
+
+A hand-run `build_packages.sh -d` does **not**, and nothing warns you.
+
+Verify by checksum, never by eye — the patched and clean binaries are **the same
+size** (2,002,480 bytes), so a directory listing tells you nothing:
+
+```sh
+md5sum /opencloud/prebuilts/recovery/update-binary \
+       /opencloud/hadk/out/target/product/karatep/system/bin/updater
+```
+
+The two hashes must match. `bin/build-image.sh` now refuses to build when they
+do not, so the guard only matters if you drive `mic` by hand.
+
+If `/opencloud/prebuilts/recovery/update-binary` is missing, build it with
+`bin/build-los-recovery.sh`. Full background: [`rca/broken-update-binary.md`](rca/broken-update-binary.md).
+
 ### Sign it first
 
 `mic` emits the zip unsigned, and the recovery refuses an unsigned package:
@@ -91,7 +128,7 @@ via `updater-unpack.sh`, then writes `hybris-boot.img` to
 |---|---|
 | `Footer is wrong` / `Signature verification failed` | The zip is unsigned. Run `bin/sign-installer-zip.sh`. |
 | `Failed to extract filesystem!` | The recovery has no `bzip2` — see [`los-recovery.md`](los-recovery.md#bzip2). |
-| `killed by signal 11` right after `Installing update...` | The zip's `update-binary` was built from the hybris-patched tree — see [`rca/broken-update-binary.md`](rca/broken-update-binary.md). |
+| `killed by signal 11` **or** `signal 7` right after `Installing update...` | The zip's `update-binary` was built from the hybris-patched tree. Both signals are the same fault (SIGSEGV / SIGBUS depending on where it lands). Rebuild via `bin/build-hal-packages.sh` — see [above](#check-the-updater-before-you-sign-anything) and [`rca/broken-update-binary.md`](rca/broken-update-binary.md). Note the install aborts *before* touching `/data`, so the existing system is left intact and the device still boots. |
 | `Failed to start fuse` | A stale `/sideload` mount from a killed sideload: `adb shell umount -l /sideload`. |
 
 ---

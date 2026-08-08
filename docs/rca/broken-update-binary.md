@@ -11,6 +11,13 @@ E:Error in /sideload/package.zip (killed by signal 11)
 Install from ADB complete (status: 1).
 ```
 
+The signal number is not stable — **`signal 7` (SIGBUS) and `signal 11` (SIGSEGV)
+are both this fault**, depending on where the broken binary happens to fault.
+Treat either as the same diagnosis.
+
+The install aborts before it touches `/data`, so nothing is lost: the previous
+`/data/.stowaways/sailfishos` survives and the device still boots.
+
 `/cache/recovery/last_install` records `time_total: 26` — the whole 26 s is
 signature verification. The install itself lasted 0.1 s.
 
@@ -88,6 +95,19 @@ rpm/dhd/helpers/build_packages.sh -d
 normal build order handles it. The ordering constraint is real: the script must
 run **after** the last Android build (any `make` regenerates the patched
 binary) and **before** `-d`.
+
+**This has recurred.** It comes back whenever someone rebuilds the kernel and
+then reaches for `build_packages.sh -d` directly instead of
+`bin/build-hal-packages.sh` — the `-d` is the obvious step to repeat and the
+updater fix is invisible from there. Two defences are now in place:
+
+- `bin/build-image.sh` refuses to build an image when
+  `out/…/system/bin/updater` does not match `prebuilts/recovery/update-binary`.
+- [`flashing.md`](../flashing.md#check-the-updater-before-you-sign-anything)
+  leads with the check.
+
+Do **not** compare the two binaries by size. They are both 2,002,480 bytes —
+same sources, different toolchain — so only a checksum distinguishes them.
 
 Verified on device: the pristine binary reports its usage error and the install
 proceeds past `Installing update...`.
