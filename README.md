@@ -31,23 +31,21 @@ real SIM is available.
 | **Build died on `external/chromium-webview`** | LineageOS' manifest links a file that no longer exists upstream, leaving a dangling symlink. The project is now dropped in [`manifests/local_manifests.xml`](manifests/local_manifests.xml). |
 | **No boot splash** (black screen between the Lenovo logo and the UI) | hybris-boot's `HYBRIS_BOOTLOGO` draws the splash with `zcat > /dev/fb0`, which on this panel *always* fails with `ENODEV` — a device-tree/driver mismatch leaves `fb0` with no backing memory until something `mmap()`s it, and MDP5 scans out nothing without an explicit commit. Replaced with `hybris-boot/fbsplash.c`, a 4.4 KB freestanding helper doing `mmap` → `read` → `FBIOPAN_DISPLAY` that then holds the fd (closing it blanks the panel). It must **not** be linked against bionic. Verified on hardware. → [details](docs/porting-notes.md#boot-splash-needs-a-helper-hybris_bootlogos-own-mechanism-cannot-work) |
 
-### Hardware
+### Feature status
 
-> ⚠️ **This table is stale and must not be relied on.** Hands-on testing has shown entries that
-> are simply wrong in both directions. Treat
-> every row below as *unverified*, including the ✅ ones, until it is re-tested. It is being replaced
-> by an evidence-based `docs/feature-matrix.md`, where each status is backed by a log line, a config
-> line, or a hands-on result.
->
-> Note also that **cellular cannot currently be tested beyond SIM detection** — only a dummy SIM is
-> available, so mobile data, SMS, calls, VoLTE and the SIM 2 status are unverifiable rather than
-> broken. Camera flash is likewise unverified.
+Every row states what its status rests on. **✅ means verified on this device** — a hands-on test
+or a measurement, recorded in the linked write-up. **❓ means there is no test on record**, not that
+something is known to be broken.
+
+> **Cellular cannot be finished here.** Only a **dummy SIM** is available, so everything past SIM
+> detection — registration, calls, SMS, mobile data, VoLTE, the SIM 2 status — is *unverifiable*
+> rather than broken.
 
 | Subsystem | Status | Notes |
 |---|---|---|
-| Display | ✅ | pixel ratio 1.6 |
-| Touch | ✅ | |
-| Graphics / UI | ✅ | `hwcomposer-2-1` + lipstick |
+| Display | ✅ | pixel ratio 1.6. Includes the boot splash, which needs `hybris-boot/fbsplash.c` — `HYBRIS_BOOTLOGO`'s own `zcat > /dev/fb0` cannot work on this panel → [details](docs/porting-notes.md#boot-splash-needs-a-helper-hybris_bootlogos-own-mechanism-cannot-work) |
+| Touch | ✅ | the same controller also emits the three capacitive keys — see *Keys — home, nav* |
+| Graphics / UI | ✅ | `hwcomposer-2-1` + lipstick; comes up unaided since the `libbinder`/VNDK fix → [full analysis](docs/rca/vndservicemanager-libbinder.md) |
 | Cameras — stills | ✅ | both cameras; full sensor resolution (rear 4632x3474 / 4320x2432, front 3264x2448 / 3264x1836) |
 | Cameras — video | ✅ | both cameras verified recording 1080p H.264 Baseline + AAC-LC 48 kHz stereo, decoded clean end to end. **Capped at 1080p deliberately** — the HAL offers 3840x2160 but the AVC encoder's real limit is 1920x1088. One rough edge left: the frame rate floats with exposure (12.5–16.7 fps measured indoors, 30 fps in good light) because nothing pins `preview-fps-range`, and the video track ends ~0.3–0.7 s before the audio track → [details](docs/rca/camera-dies-on-record.md) |
 | Camera flash / torch | ⚠️ | rear HAL advertises `off, auto, on, torch` and `CameraService` torch state changes were observed on hardware; not yet verified against an actual exposure. Front camera has no flash — no `flash-mode-values` key at all |
@@ -62,27 +60,36 @@ real SIM is available.
 | Bluetooth | ✅ | pairing + A2DP verified. The old "controller init failed" reading was wrong — the HAL logs `Init succeded`; the 61 s cycle was `bluebinder` racing WLAN for the shared WCNSS SoC. Fixed by `Type=oneshot` on `wlan-module-load.service` plus an ordering drop-in; `bluebinder` no longer masked, `NRestarts=0` |
 | WLAN | ✅ | `wlan0` up at boot with the device's real MAC, associates, holds an IP and reaches the internet. **2.4 GHz only — hardware limit**, not a config gap. DNS needed a fix of its own: paranoid networking denied systemd-resolved (uid 997) any socket → [details](docs/porting-notes.md#associated-ip-address-gateway-reachable--and-every-name-lookup-fails) |
 | WLAN — WPA3 | ⚠️ | WPA3-**transition** APs work (WPA2-PSK + PMF) after the prima `MFPEnabled` fix. WPA3-**only** cannot work: SAE needs `NL80211_CMD_EXTERNAL_AUTH` (Linux 4.17), absent on 3.18 → [details](docs/porting-notes.md#wpa3-transition-aps-ctrl-event-assoc-reject-status_code1) |
-| WLAN hotspot | ❌ | |
-| Cellular — signal (SIM 1) | ✅ | |
-| Cellular — calls / SMS | ❓ | untested |
-| Cellular — mobile data | ❌ | |
-| Cellular — SIM 2 | ❌ | "Network: Denied" |
+| WLAN hotspot | ❓ | never exercised. `jolla-settings-networking-tethering` is in the image and connman runs with only `jolla_rfkill` disabled, so there is nothing known to be missing — but no one has switched it on. (The earlier ❌ here had no test behind it.) |
+| Cellular — SIM 1 / RIL | ⚠️ | SIM 1 is detected and signal is reported; both slots are configured over the binder RIL transport (`ril_subscription.conf`, `ril_0`/`ril_1`). `ofono` sometimes needs `systemctl restart ofono` after boot before RIL comes up. Nothing past detection is testable — see the note above |
+| Cellular — calls / SMS | ❓ | no usable SIM |
+| Cellular — mobile data | ❓ | did not work when last attempted and is still listed in [Still to fix](docs/porting-notes.md#still-to-fix), but it has not been re-tested and cannot be with a dummy SIM |
+| Cellular — SIM 2 | ❓ | reports "Network: Denied". With no live SIM in slot 2 that is indistinguishable from an inactive SIM, so this is not evidence of a port defect |
 | VoLTE | ➖ | needs Jolla proprietary bits |
 | GPS | ✅ | verified on hardware: fixes outdoors to **11.8 m** on 6 satellites (GPS + GLONASS), 37 visible, peak 34 dBHz. Cold start ~12 min, warm start 10 s. Needed a device drop-in forcing `GEOCLUE_HYBRIS_POSITION_MODE=standalone` — upstream requests MS_BASED unconditionally, which stalls this engine outright (`mEngineOn: 0`, zero satellites). XTRA and NTP injection work and are unaffected by the mode. → [details](docs/porting-notes.md#gps-works) |
-| Sensors | ⚠️ | rotation works; individual sensors unverified |
-| Fingerprint (FPC 1020) | ✅ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled". The same HAL quirk from the other side — `enumerate()` fails outright once templates *do* exist — made enrolled fingerprints appear lost after a reboot and blocked re-enrolment; also fixed in the fork. Enrolment, unlock and **removal** all verified. Root cause of every fingerprint fault here: the FPC vendor library returns the template *count* where `fingerprint.h` specifies 0, and the LineageOS HIDL adapter treated that as an error, so it never synthesised the `onEnumerate` callbacks and the daemon never learned a template id. Fixed in our fork of `android_hardware_lineage_interfaces`. **The rebuilt service must be installed onto `/vendor` by hand** — it is the one change an image build cannot deliver. → [details](docs/porting-notes.md#fingerprint-fpc-1020) |
-| Vibration | ✅ | |
+| Sensors — accelerometer | ✅ | display rotation follows the device, so the accelerometer reaches Qt through `sensorfw` and `hybris-libsensorfw-qt5-binder` |
+| Sensors — ambient light | ✅ | verified indirectly but by measurement: mce scales LED brightness by an ALS-derived level, and the LED measured 6% of full in a dark room against 40% in ordinary room light with the stock lux ladder — so lux readings do reach mce → [details](docs/porting-notes.md#the-current-setting-is-only-half-of-it--mce-throttles-the-led-by-ambient-light). Display auto-brightness itself has not been checked separately |
+| Sensors — proximity | ❓ | never read. The obvious test — blanking during a call — needs a working SIM |
+| Sensors — gyroscope, magnetometer | ❓ | the hardware is there: the vendor SSC config declares accel, gyro and mag axes (`karate-common/configs/sensors/sensor_def_qcomdev.conf`, `CONFIG_SENSORS_SSC=y`). Neither has been read on Sailfish |
+| Fingerprint (FPC 1020) | ✅ | enrolment and unlock verified on hardware (two templates enrolled, daemon cycles `IDENTIFYING`). Uses `sailfish-fpd-community` (Jolla's `sailfish-fpd` is unusable — no `sailfish-fpd-slave` exists for karatep) built from our fork (`Sailfish-on-karatep/sailfish-fpd-community`, `hybris-18.1`): this vendor HIDL 2.1 HAL never calls the enumerate callback when no templates exist, leaving the daemon wedged in `FPSTATE_ENUMERATING` forever, so `AndroidFP::enumerate()` arms a 3 s timeout and treats silence as "nothing enrolled". The same HAL quirk from the other side — `enumerate()` fails outright once templates *do* exist — made enrolled fingerprints appear lost after a reboot and blocked re-enrolment; also fixed in the fork. Enrolment, unlock and **removal** all verified. Root cause of every fingerprint fault here: the FPC vendor library returns the template *count* where `fingerprint.h` specifies 0, and the LineageOS HIDL adapter treated that as an error, so it never synthesised the `onEnumerate` callbacks and the daemon never learned a template id. Fixed in our fork of `android_hardware_lineage_interfaces`. **The rebuilt service must be installed onto `/vendor` by hand** — it is the one change an image build cannot deliver. One caveat worth knowing: templates live on `/data` and so **survive a reflash and a factory reset**, which is how a previous owner's finger can still unlock a freshly installed system → [details](docs/porting-notes.md#fingerprint-fpc-1020), [reflash caveat](docs/rca/stale-fingerprint-templates.md) |
+| Vibration | ✅ | `ngfd-plugin-native-vibrator` + `libhybris-libvibrator`; haptics work in the UI. No write-up — this row rests on use, not on a measurement |
 | Notification LED | ⚠️ | Lights for every pattern and breathes correctly; charging/charged and notification patterns verified on hardware. Brightness took three separate fixes, only two of which were the obvious ones: the `white` mce backend pinned to `/sys/class/leds/green` (autoprobe otherwise matches `redgreen` and leaves the real LED dark), the MPP sink raised from Lenovo's 5 mA to the 40 mA hardware ceiling, and — the dominant effect, and the one that made the first two look like they had failed — mce's `[BrightnessLed]` ALS curve, which floors at 6% and gave only 40% in room light. Measured peak on the node was 101/255 with the stock curve against 255/255 without it. Still ⚠️ because the 40 mA sink is not yet confirmed on hardware, and it cannot be tested without a reflash (`MSM_SPMI_DEBUGFS_RO` compiles debugfs register writes out). `PatternDeviceOn` does **not** light this LED despite being configured — measured, don't "fix" it. → [details](docs/porting-notes.md#notification-led) |
-| Keys — power, volume | ✅ | |
-| Keys — back | ✅ | |
+| Keys — power, volume | ✅ | power blanks/unblanks and long-press reaches the power menu; volume adjusts |
+| Keys — back | ✅ | an ordinary `Qt::Key_Back`, handled by applications; worked throughout |
 | Keys — home, nav | ✅ | home → app switcher, square → top menu. The keys come from the touch controller and always worked; lipstick just needed them declared to `ssu-sysinfo` → [details](docs/porting-notes.md#hardware-keys) |
-| USB — networking, data, charging | ✅ | |
-| Power management | ❓ | untested |
-| RTC alarms | ❓ | untested |
-| FM radio | ❓ | untested |
+| USB — networking | ✅ | RNDIS works in both the recovery and the booted system; the whole flashing procedure and every debug session run over it → [flashing.md](docs/flashing.md) |
+| USB — MTP / data | ❓ | `buteo-mtp-qt5` and `mtp-vendor-configuration-sailfish` are installed; never connected to a host as MTP |
+| Battery / charging | ⚠️ | charges over USB, and charge state is reported well enough that mce's charging/charged LED patterns fire from it. `jolla-actdead-charging` is installed but **act-dead** (charging with the device switched off) has not been tested |
+| Power off / reboot | ⚠️ | powers off cleanly much of the time, and intermittently wedges with the screen off, needing a hard reset. Ramoops shows userspace getting well into shutdown, the modem then failing to halt (`wait_for_shutdown_ack` timeout, `Port … halt timeout`), and PS_HOLD never reached. Not root-caused; the modem is the leading suspect, and the porter archive has zero prior art. A *graceful* `reboot` always hangs — `droid-hal-init.service` never stops — so use `reboot -f` → [investigation](docs/rca/shutdown-hang.md) |
+| Suspend / resume | ❓ | never measured: no idle-drain or wakeup figures on record. This is the HADK adaptation checklist's `iphb` item, still open → [checklist](docs/hadk-compliance.md) |
+| RTC alarms | ❓ | `CONFIG_RTC_DRV_QPNP` is built in; no alarm has been tested, and a meaningful test depends on suspend/resume above |
+| FM radio | ❓ | the kernel builds `CONFIG_RADIO_IRIS` / `CONFIG_RADIO_IRIS_TRANSPORT`, but nothing in the image drives it — there is no FM application, and PulseAudio's `fmradio.conf` snippet ships **disabled**, as upstream ships it (the 21-byte stub that used to sit there broke audio policy entirely → [details](docs/porting-notes.md#everything-silent-module-policy-enforcement-never-loaded)) |
+| Factory reset | ❌ | by design, not a regression: Sailfish's reset is a **btrfs snapshot rollback** needing `factory-@`/`factory-@home` subvolumes, and this port's rootfs is ext4 in a stowaway under `/data`. Settings reports success and erases nothing. Deliberately not worked around → [full analysis](docs/rca/factory-reset-does-nothing.md) |
+| Android apps (Waydroid) | ⚠️ | installed and initialised on hardware, container not yet started. It died on a missing kernel option (`CONFIG_DEVPTS_MULTIPLE_INSTANCES`); the fix is in the tree and awaits a reflash. A known Sailfish OS 5.1 regression sits behind that, not yet reached → [waydroid.md](docs/waydroid.md), [rca](docs/rca/waydroid-devpts.md) |
 | NFC | ➖ | no hardware |
 
-✅ works · ⚠️ partial / needs a workaround · ❌ broken · ❓ untested · ➖ not applicable
+✅ verified on hardware · ⚠️ partial, or verified with a caveat · ❌ broken or not possible ·
+❓ no test on record · ➖ not applicable
 
 ---
 

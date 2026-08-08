@@ -1444,9 +1444,15 @@ unchanged.
 
 ---
 
-## Bluetooth (broken)
+## Bluetooth (works)
 
-`android.hardware.bluetooth@1.0-service-qti` aborts itself roughly every 61 s:
+Pairing and A2DP verified on hardware, from a cold boot with **nothing masked**. `bluebinder`
+stays active with `NRestarts=0`, and `wlan0` and `hci0` are both present on the same boot.
+
+### The 61 s abort cycle was a race with WLAN, not a controller fault
+
+The symptom used to be `android.hardware.bluetooth@1.0-service-qti` aborting itself roughly
+every 61 s:
 
 ```
 vendor.qti.bluetooth@1.0-data_handler: Aborting daemon to recover as controller init failed
@@ -1456,20 +1462,57 @@ hwservicemanager: Since android.hardware.bluetooth@1.0::IBluetoothHci/default is
                   registered, trying to start it as a lazy HAL.
 ```
 
-so `bluebinder` never activates and loops `Bluetooth binder service failed / Remote has died`,
-climbing hci index each time (`Own hci index: 5`).
+with `bluebinder` never activating and looping `Bluetooth binder service failed / Remote has
+died`, climbing hci index each time (`Own hci index: 5`).
 
-The HADK-FAQ prerequisites for binderized Bluetooth are already met — `CONFIG_BT_HCIVHCI=y` is
-in the defconfig and bluebinder is installed — so this is device-specific controller bring-up,
-not missing setup. The SMD transport nodes exist and are owned correctly
-(`/dev/smd2`, `/dev/smd3`, `bluetooth:bluetooth`).
+**"Controller init failed" was a misreading**, and it sent this investigation down the wrong
+path for a long time. The HAL is fine: it logs `Init succeded`, downloads its firmware and reads
+its BD address correctly. The HADK-FAQ prerequisites were met all along (`CONFIG_BT_HCIVHCI=y`
+in the defconfig, bluebinder installed, `/dev/smd2` and `/dev/smd3` present and owned
+`bluetooth:bluetooth`).
 
-**Workaround:** `systemctl mask bluebinder`. With it masked the BT HAL starts once and stays
-put instead of crash-looping.
+The real cause is that **BT and WLAN share one WCNSS/pronto SoC on this device, and nothing
+ordered them**:
 
-**Also wrong regardless of the HAL bug:** `bluebinder.service` is `WantedBy=graphical.target`
-*and* `Before=graphical.target`, so while it is stuck activating it delays the UI. A Bluetooth
-proxy should not gate the display.
+* `modprobe wlan` takes ~12 s here, because the WCNSS firmware download happens inside module
+  init — see [WLAN](#wlan) above.
+* `wlan-module-load.service` was `Type=simple`, so systemd declared it started the instant it
+  forked `modprobe` — twelve seconds before the module existed.
+* `bluebinder.service` ships ordered only `After=droid-hal-init.service`, so every boot it
+  started into the middle of that window and took the SoC. Both radios then lost: `modprobe`
+  returned `ENODEV` (no `wlan0`) and bluebinder's own init failed, restart-looping every 61 s —
+  its `TimeoutStartSec=60` plus `Restart=always`.
+
+That is why the two faults always appeared together, and why unmasking `bluebinder` for
+Bluetooth debugging reliably broke WLAN.
+
+### The fix: two changes that only work together
+
+Both in `droid-config-karatep` (`acad63c`):
+
+* `wlan-module-load.service` becomes **`Type=oneshot`** (`RemainAfterExit=yes`), so systemd waits
+  for `modprobe` to actually exit. `Restart=on-failure` goes away with it — systemd ignores
+  `Restart=` for oneshot units, and with the ordering right the first attempt succeeds.
+* a `bluebinder.service.d` drop-in adds **`After=wlan-module-load.service`**. On its own this did
+  nothing at all, because `Type=simple` had already reported success.
+
+Keep the pair together: reverting either one restores the race.
+
+Verified from a cold boot:
+
+```
+[11.909] Starting Load wlan module...
+[24.299] wlan: driver loaded
+[24.303] Started Load wlan module.
+[24.443] bluebinder: Own hci index: 1
+[24.518] bluebinder: Bluetooth binder initialized successfully
+[24.675] bluebinder: Successfully initialized vhci bluetooth
+```
+
+**One oddity is untouched and still worth knowing:** `bluebinder.service` is
+`WantedBy=graphical.target` *and* `Before=graphical.target`, so a bluebinder that hangs delays
+the UI — which is what used to happen. It is harmless now that it activates in a fraction of a
+second, but a Bluetooth proxy still should not gate the display.
 
 ---
 
@@ -1663,10 +1706,6 @@ ink coverage**, painted white on black — preserving the anti-aliasing. Scaling
 
 ## Known-good workarounds (not yet root-caused)
 
-* **`bluebinder` and WLAN conflict at boot.** With `bluebinder` unmasked, `wlan0` never
-  appears and `modprobe wlan` reports no such device; `bluebinder` itself hangs in
-  "activating". Masking `bluebinder` makes WLAN work, and Bluetooth works if the service is
-  started manually after boot. Possibly related to an incorrect WLAN MAC — unconfirmed.
 * **`ofono` sometimes needs `systemctl restart ofono` after boot** for RIL to come up.
 * **To escape a bootloop**, create `/data/.stowaways/sailfishos/init_enter_debug2`. init then
   halts before starting systemd and telnet is available on port 2323. (Thanks @mal)
@@ -1721,11 +1760,13 @@ done | sort -u
 
 * IMS daemons (`vendor.imsrcsservice`, `vendor.ims_rtp_daemon`, `vendor.imsdatadaemon`)
   crash-loop continuously, spamming the journal.
-* `hwservicemanager` retries `android.hardware.bluetooth@1.0::IBluetoothHci` every ~61 s.
-* Failed systemd units: `droid-bootctl.service`, `systemd-tmpfiles-setup.service`,
-  `wlan-module-load.service`. (`dev-binderfs.mount` also fails, but that is expected — binderfs
-  is Linux 5.0+ and this kernel is 3.18; the legacy `/dev/{,hw,vnd}binder` nodes are correct.)
-* Mobile data does not work; SIM slot 2 reports "Network: Denied".
+* Failed systemd units: `droid-bootctl.service`, `systemd-tmpfiles-setup.service`.
+  (`dev-binderfs.mount` also fails, but that is expected — binderfs is Linux 5.0+ and this
+  kernel is 3.18; the legacy `/dev/{,hw,vnd}binder` nodes are correct.) `wlan-module-load.service`
+  used to be on this list; it succeeds since it became `Type=oneshot` — see
+  [Bluetooth](#the-fix-two-changes-that-only-work-together).
+* Mobile data does not work; SIM slot 2 reports "Network: Denied". Neither is confirmed to be a
+  port defect — only a dummy SIM is available, so nothing past SIM detection can be tested.
 * RIL is flaky. (Cameras are no longer — see [Camera](#camera).)
 
 ---
