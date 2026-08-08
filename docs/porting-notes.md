@@ -541,11 +541,16 @@ way. Fixed in our kernel fork; verified on hardware:
 
 ---
 
-## GPS (does not acquire)
+## GPS (tracks satellites, does not fix)
 
-The whole software chain works and a positioning session genuinely reaches the hardware. What
-does not happen is acquisition: the receiver **never reports a single satellite in view**, with a
-clear sky, over sessions lasting minutes.
+The whole software chain works and a positioning session genuinely reaches the hardware. The
+engine searches, and both GPS and GLONASS are tracked. What does not happen is a fix: signal
+levels peak around 31 dBHz with only one or two satellites audible at once.
+
+**Read this section in order.** Much of what follows describes a state where the receiver reported
+*no satellites at all*. That turned out to be a software regression, diagnosed later -- see
+"MS_BASED is what stops the engine" below. The early findings are kept because the diagnostic
+technique is still what you need, but their conclusion is superseded.
 
 ### First: you cannot test this with `dbus-send`
 
@@ -644,8 +649,11 @@ Worth recording because it is real, and worth fixing once acquisition works:
 * `reportSv: At least one RF_LOSS is 0 in gps.conf, please configure it` -- RF loss compensation
   is uncalibrated for this device.
 
-None of this explains zero satellites *in view*, which happens before assistance is relevant. It
-would explain a slow or absent *fix*, not an engine that never searches.
+*Superseded.* The reasoning here was that none of this explains zero satellites *in view*, since
+that happens before assistance is relevant -- it would explain a slow or absent *fix*, not an
+engine that never searches. That is sound for assistance **content**, and wrong about assistance
+**mode**: requesting MS_BASED is itself what keeps the engine off, whether or not assistance
+arrives. See "MS_BASED is what stops the engine" below.
 
 ### Fixed along the way
 
@@ -707,14 +715,6 @@ all. It is insurance against a race that was observed, not the fix.
 
 Worth recording so they are not re-attempted:
 
-* **Position mode.** `geoclue-providers-hybris` picks MS_BASED vs STANDALONE from
-  `m_agpsEnabled`, which is assigned from `hybrisEnabled()` -- whether the provider is enabled at
-  all, not whether assistance is available. A patch to key it off `m_agpsOnlineEnabled` was
-  committed and then **reverted** (`7f3007b`). It was never validated -- the mode stayed MSB in
-  every test, because `hybrisOnlineState()` does not track `hybris\online_enabled` in
-  `location.conf` the way the patch assumed -- and once forced injection worked its premise was
-  gone: assistance *is* available, so MS_BASED is right, and forced injection is driven by the
-  gps_xtra.ini flags rather than by `m_agpsOnlineEnabled` anyway.
 * **`/vendor/etc/gps.conf` edits.** `DEBUG_LEVEL=5` was diagnostic. `XTRA_CA_PATH` was pointed at
   `/etc/ssl/certs` because the stock `/usr/lib/ssl-1.1/certs` does not exist -- but it never
   mattered on our path: the XTRA download is done by geoclue-hybris through Qt against the system
@@ -723,26 +723,128 @@ Worth recording so they are not re-attempted:
   service, which is genuinely required. `gps.conf.orig` is kept beside it.
 * **`/etc` config symlinks** are kept, but they changed nothing measurable and remain unproven.
 
+### Pure Maps showing a city 1270 km away is not GNSS at all
+
+Symptom: with GNSS acquiring nothing, Pure Maps still drops a pin -- in Navi Mumbai, for a handset
+in Tamil Nadu.
+
+`/usr/libexec/geoclue-mlsdb` publishes `19.1258 N, 73.0004 E` with `±25000 m` accuracy, and
+`geoclue-master` relays whichever provider is available to the client. It queries
+`https://api.beacondb.net/v1/geolocate` (the community successor to the shut-down Mozilla Location
+Service). Here ofono's `CellInfo.GetCells` returns an empty array and the only visible BSSID is
+the tethering hotspot, so BeaconDB has nothing to work with and falls back to IP geolocation --
+which lands on the carrier's egress, not the handset. mal on `#sailfishos-porters`, 2025-04-24:
+*"not sure how good that beacondb is in your area, that is a bit work in progress, it's expanding
+but not good in many areas."*
+
+It also **poisons the GNSS engine**. `hybrisprovider.cpp`'s `injectPosition` slot listens for
+`PositionChanged` on *any* `org.freedesktop.Geoclue.Position` interface, so the mlsdb guess was
+injected as the engine's position seed -- 1270 km from truth, which is worse than no seed at all.
+
+Disabled in both copies of the config (they are separate inodes, and both are read):
+
+```ini
+# /etc/location/location.conf  AND  /var/lib/location/location.conf
+mls\enabled=false
+mls\online_enabled=false
+```
+
+Two things to know before blaming this for an acquisition failure: a wrong seed was **not** what
+kept the engine off -- sessions with no seed at all, and with a hand-injected correct seed, both
+reported zero satellites. And the seed path itself works: `Injecting position 3 <ts> 8.80606
+78.1269 nan 5000 nan` confirms a `PositionChanged` from any provider reaches the modem, which is
+also how you feed a known-good seed for testing.
+
+### MS_BASED is what stops the engine, and the revert of `453b22a` caused a regression
+
+This section supersedes an earlier one that listed the position-mode patch under "tried and backed
+out". That was wrong, and the reasoning given for backing it out -- *"assistance is available, so
+MS_BASED is right"* -- is the mistake.
+
+`geoclue-providers-hybris` picks MS_BASED vs STANDALONE from `m_agpsEnabled`, assigned at
+`hybrisprovider.cpp:1125` from `hybrisEnabled()`: whether the provider is enabled at all, not
+whether assistance can be delivered. It is therefore always true while the provider runs, so
+MS_BASED is unconditional and STANDALONE is unreachable.
+
+On this adaptation MS_BASED does not degrade to autonomous acquisition -- it stalls outright. With
+`operationMode MSB`, over a 300 s held session:
+
+```
+QMI_LOC_START_REQ_V02          result = 0, error = 0, status = 0   session starts cleanly
+QMI_LOC_EVENT_WIFI_REQ_IND_V02          6    modem asks for assistance
+QMI_LOC_EVENT_INJECT_TIME_REQ_IND_V02   2    modem asks for time
+QMI_LOC_INJECT_WIFI / INJECT_UTC_TIME   0    nothing answers
+QMI_LOC_EVENT_GNSS_SV_INFO_IND_V02      0
+mEngineOn: 0 for the whole session, no engine-state indication at all
+```
+
+Forcing STANDALONE on the identical build and the identical spot turns the engine on:
+
+```
+gnssSetPositionMode]: (0 0 1000 0 0 2 1000)      mode 0 = STANDALONE
+setOperationMode:9542]: operationMode STANDALONE
+                                                 128 s later:
+QMI_LOC_EVENT_GNSS_SV_INFO_IND_V02  173 indications at 1 Hz
+16 SVs in view -- GPS 5,6,11,12,13,14,15,20 and GLONASS 65,66,76,77,78,81,87,88
+```
+
+So `8086839` (the revert of `453b22a`) silently regressed GPS from "tracking, no fix" back to
+"engine never starts", and the *"never reports a single satellite in view"* symptom at the top of
+this section is a consequence of that revert, not a hardware fact.
+
+Our fork now selects the mode through `GEOCLUE_HYBRIS_POSITION_MODE` (`ff43421`): `standalone` or
+`msb` forces it, unset keeps upstream behaviour, so the mode is testable without a rebuild -- which
+is exactly what `453b22a` lacked and why it was backed out on a bad measurement.
+
+Note the two are not in conflict: forced XTRA/NTP injection is driven by the `gps_xtra.ini` flags
+and keeps working in STANDALONE. The engine gets its ephemeris *and* searches.
+
 ### Where it stands
 
 The software chain is now doing everything it should: sessions start, the engine searches, both
 constellations are tracked, and time and ephemeris are injected. What is left is signal level.
 
-Under clear sky the receiver reaches only about **22 dBHz** on a satellite at 76-80 degrees
-elevation -- essentially overhead, where open sky should give 35-45 dBHz -- and only one satellite
-is heard at a time. Four are needed to fix. Nothing in software explains a ~20 dB deficit.
+Measured over a 300 s STANDALONE session, `DEBUG_LEVEL=5`, indoors beside a window:
+
+| | |
+|---|---|
+| SVs in view | 16 (8 GPS + 8 GLONASS) |
+| SVs with non-zero C/N0 | 1-2 at a time |
+| peak C/N0 | **31 dBHz** |
+| C/N0 samples >= 25 dBHz | 24 out of ~500 |
+| modal C/N0 | 22-23 dBHz |
+| SVs used in fix | 0 |
+
+Four satellites sustained above roughly 30 dBHz are needed to fix. The other 14 SVs carry
+elevation and azimuth but `cN0Dbhz=0`: those are XTRA-predicted positions, not tracked signals.
+So the engine knows where to look and hears almost nothing back.
+
+Read the `SatelliteChanged` tuple as **`(prn, elevation, azimuth, snr)`** --
+`hybrisprovider.cpp:131`. Getting that order wrong makes an elevation look like a spectacular
+C/N0; it cost a bogus "73 dBHz" reading here.
+
+`reportSv: At least one RF_LOSS is 0 in gps.conf, please configure it` fires every second: all ten
+`RF_LOSS_*` keys are commented out in the vendor `gps.conf`. That is a real uncalibrated-offset
+gap, but it biases *reported* C/N0, it does not deafen the receiver -- do not expect it to be the
+answer.
 
 The kernel device tree has **no GPS entries at all** for karatep or karate-common, so no LNA
 regulator or antenna GPIO is under our control; it is modem-controlled or always-on hardware.
 
-The measurement to make next is a comparison, not another code change: on the same handset in the
-same spot, an Android build should report 35-45 dBHz on an overhead satellite. If it reports ~22
-as well, the port is doing its job and this is the unit's ceiling. If it reports 40+, something
-switches the LNA on that we do not.
+Two measurements to make next, in this order, and neither is a code change:
 
-> Two false trails, recorded so they are not walked again: the 30 s session cycle is client churn,
-> not GNSS behaviour; and `LocSvc_GnssInterface: serviceDied` is the HAL reporting that *its
-> client* disconnected, not the GNSS service crashing.
+1. **Outdoors, clear sky, same build.** Every number above was taken indoors beside a window,
+   where 20-30 dBHz is unremarkable for a phone. This is cheap and it may simply end the
+   investigation.
+2. **Android on the same handset, same spot.** It should report 35-45 dBHz on an overhead
+   satellite. If it reports ~31 as well, the port is doing its job and this is the unit's ceiling.
+   If it reports 40+, something switches the LNA on that we do not.
+
+> Three false trails, recorded so they are not walked again: the 30 s session cycle is client
+> churn, not GNSS behaviour; `LocSvc_GnssInterface: serviceDied` is the HAL reporting that *its
+> client* disconnected, not the GNSS service crashing; and `msm_ipc_router_bind: Loc_hal_worker Do
+> not have permissions` is real but not the blocker -- running the HAL with full capabilities
+> (`CapEff: 0000003fffffffff`) clears the error and changes nothing about acquisition.
 
 ---
 
