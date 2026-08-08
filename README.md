@@ -85,7 +85,7 @@ something is known to be broken.
 | RTC alarms | ❓ | `CONFIG_RTC_DRV_QPNP` is built in; no alarm has been tested, and a meaningful test depends on suspend/resume above |
 | FM radio | ❓ | the kernel builds `CONFIG_RADIO_IRIS` / `CONFIG_RADIO_IRIS_TRANSPORT`, but nothing in the image drives it — there is no FM application, and PulseAudio's `fmradio.conf` snippet ships **disabled**, as upstream ships it (the 21-byte stub that used to sit there broke audio policy entirely → [details](docs/porting-notes.md#everything-silent-module-policy-enforcement-never-loaded)) |
 | Factory reset | ❌ | by design, not a regression: Sailfish's reset is a **btrfs snapshot rollback** needing `factory-@`/`factory-@home` subvolumes, and this port's rootfs is ext4 in a stowaway under `/data`. Settings reports success and erases nothing. Deliberately not worked around → [full analysis](docs/rca/factory-reset-does-nothing.md) |
-| Android apps (Waydroid) | ⚠️ | installed and initialised on hardware, container not yet started. It died on a missing kernel option (`CONFIG_DEVPTS_MULTIPLE_INSTANCES`); the fix is in the tree and awaits a reflash. A known Sailfish OS 5.1 regression sits behind that, not yet reached → [waydroid.md](docs/waydroid.md), [rca](docs/rca/waydroid-devpts.md) |
+| Android apps (Waydroid) | ❌ | **not usable as it stands.** Waydroid 1.6.3 is built from our fork and the container does boot Android on hardware (the `CONFIG_DEVPTS_MULTIPLE_INSTANCES` and overlayfs blockers are fixed and in the tree, and the vibrator HAL boot loop is fixed by `android-vibrator-hal.service`). But **touch does not work on any Waydroid surface under lipstick**, matching the Sailfish OS 5.1 regression upstream has not fixed, and **running the container permanently breaks the host's own camera** until the next reboot by creating empty Android cpusets on the shared cgroup v1 hierarchy → [waydroid.md](docs/waydroid.md), [devpts rca](docs/rca/waydroid-devpts.md), [cgroup rca](docs/rca/waydroid-poisons-host-cgroups.md) |
 | NFC | ➖ | no hardware |
 
 ✅ verified on hardware · ⚠️ partial, or verified with a caveat · ❌ broken or not possible ·
@@ -105,6 +105,7 @@ something is known to be broken.
 | [`docs/rca/`](docs/rca/) | Root-cause write-ups for bugs that were properly diagnosed. |
 | [`docs/waydroid.md`](docs/waydroid.md) | Running Android apps via Waydroid: the kernel options it needs, how the packages are built, and the Sailfish OS 5.1 regression to be aware of first. |
 | [`docs/rca/waydroid-devpts.md`](docs/rca/waydroid-devpts.md) | Why the Waydroid container refused to start: `CONFIG_DEVPTS_MULTIPLE_INSTANCES`, plus the overlayfs limitation found alongside it. |
+| [`docs/rca/waydroid-poisons-host-cgroups.md`](docs/rca/waydroid-poisons-host-cgroups.md) | Why running Waydroid kills the Sailfish camera until the next reboot: the container writes the host's cgroup v1 cpuset hierarchy. |
 | [`docs/hadk-compliance.md`](docs/hadk-compliance.md) | Chapter-by-chapter audit of this port against the HADK: what complies, what was fixed, and which deviations are deliberate. |
 | [`docs/useful-commands.md`](docs/useful-commands.md) | Short command reference (rebooting to fastboot/recovery from Sailfish, etc.). |
 | [`manifests/local_manifests.xml`](manifests/local_manifests.xml) | The `repo` local manifest. Copy to `$ANDROID_ROOT/.repo/local_manifests/`. |

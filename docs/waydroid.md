@@ -245,12 +245,33 @@ Reboot — `waydroid-container.service` is enabled by `%post` and starts on the 
 - install `waydroid-runner`, which starts a session inside its **own nested Wayland compositor**.
   Slower, but it does not depend on the Lipstick path.
 
-### dnsmasq will probably conflict
+### dnsmasq conflicts — confirmed on hardware
 
-`waydroid-container.service` runs its own dnsmasq on `192.168.250.1` and will fail with
-`failed to create listening socket for 192.168.250.1: Address already in use` if one is already
-running. Either `systemctl disable --now dnsmasq`, or uncomment `bind-interfaces` in
-`/etc/dnsmasq.conf` and restart it. Then `systemctl restart waydroid-container`.
+Waydroid needs the dnsmasq **binary**: `waydroid-net.sh start` runs its own instance bound to
+`192.168.240.1` to serve the container's DHCP and DNS. Installing the `dnsmasq` RPM as a
+dependency also drops in a system-wide `dnsmasq.service`, which the systemd preset enables and
+which binds `0.0.0.0:53`. Waydroid's instance then cannot bind:
+
+```
+dnsmasq: failed to create listening socket for 192.168.240.1: Address already in use
+Failed to setup waydroid-net.
+RuntimeError: Command failed: % /usr/lib/waydroid/data/scripts/waydroid-net.sh start
+```
+
+Note *where* this fires: not at `waydroid-container.service` start — that service is only the
+ContainerManager D-Bus daemon, and it comes up fine. The LXC container starts on
+**`waydroid session start`**, and that is what aborts, leaving `waydroid0` non-existent and the
+session silently dead. This was almost certainly behind the "no internet in the container"
+symptom too.
+
+Fix:
+
+```sh
+systemctl disable --now dnsmasq.service
+```
+
+The binary stays; only the system-wide daemon goes. `prebuilts/waydroid/install.sh` now does this
+automatically after installing the RPMs.
 
 ---
 
