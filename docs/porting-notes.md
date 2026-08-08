@@ -541,16 +541,19 @@ way. Fixed in our kernel fork; verified on hardware:
 
 ---
 
-## GPS (tracks satellites, does not fix)
+## GPS (works)
 
-The whole software chain works and a positioning session genuinely reaches the hardware. The
-engine searches, and both GPS and GLONASS are tracked. What does not happen is a fix: signal
-levels peak around 31 dBHz with only one or two satellites audible at once.
+Fixes outdoors to ~12 m on six satellites. Cold start ~12 minutes, warm start 10 seconds.
 
-**Read this section in order.** Much of what follows describes a state where the receiver reported
-*no satellites at all*. That turned out to be a software regression, diagnosed later -- see
-"MS_BASED is what stops the engine" below. The early findings are kept because the diagnostic
-technique is still what you need, but their conclusion is superseded.
+The one thing that had to change was the position mode: upstream asks the engine for MS_BASED
+unconditionally, and on karatep that stalls it completely. `droid-config-karatep` ships a drop-in
+forcing STANDALONE. See "MS_BASED is what stops the engine" below.
+
+**Read this section in order.** Most of what follows describes a state where the receiver reported
+*no satellites at all*, and then a state where it reported satellites but never fixed. The first
+was a software regression of our own making; the second was testing indoors. Both conclusions are
+superseded by "It works" at the end. The early material is kept because the diagnostic technique
+is still what you need, and because the wrong turns are worth not repeating.
 
 ### First: you cannot test this with `dbus-send`
 
@@ -799,52 +802,122 @@ is exactly what `453b22a` lacked and why it was backed out on a bad measurement.
 Note the two are not in conflict: forced XTRA/NTP injection is driven by the `gps_xtra.ini` flags
 and keeps working in STANDALONE. The engine gets its ephemeris *and* searches.
 
-### Where it stands
+### Indoors is not a test
 
-The software chain is now doing everything it should: sessions start, the engine searches, both
-constellations are tracked, and time and ephemeris are injected. What is left is signal level.
+Every "no satellites" measurement above was taken indoors, and indoors is where this whole
+investigation went wrong. The archive is unambiguous on the point and had been for a decade:
 
-Measured over a 300 s STANDALONE session, `DEBUG_LEVEL=5`, indoors beside a window:
+```
+2018-10-07  <mal>      have you tried to go outside to see if satellites will be shown
+2015-12-21  <mal>      it might take a while to see satellites, you might need to go
+                       outside for that
+2015-09-15  <sledges>  need to go outside and wait ~15mins due to no agps
+2016-04-02  <tbr>      also make sure you're outside and have a clear sky view
+2016-05-22  <tbr>      a cold start GPS will need much better conditions and take longer
+```
+
+The closest match to our exact symptom is `2026-02-09`, three hours apart, same person:
+
+```
+12:29:59  <Mister_Magister> i have the icon but both gpsinfo and CSD fail to get any
+                            sattelite info, not even compass
+12:39:17  <Mister_Magister> in gpsinfo there's no sattelite view which usually
+                            indicates something is broken xd
+15:26:53  <Mister_Magister> mal: aaand guess I was impatient, after i froze to death
+                            outside the sattelites started popping up
+```
+
+Also worth knowing what the archive contains **nothing** about, because it marks a whole line of
+reasoning as unsupported: `cN0`, `dBHz`, `RF_LOSS`, `wtr2965`, `msm8937 gps`, `gnss antenna`,
+`antenna switch`, `rf switch`, `gps sensitivity`, `gps calibration`. Nobody has ever debugged a
+Sailfish port by C/N0 in dB. The "~20 dB RF deficit" theory that sat in this document for a day
+was invented here and had no prior art behind it. It was also wrong.
+
+The one apparent precedent for an antenna fault is a single unanswered line -- `2019-07-10
+<adampigg> still no gps sattelites tho...it tries to get a lock, maybe this pre prod device
+doesnthave the antennas` -- never followed up, never confirmed. Not prior art.
+
+### It works
+
+Outdoors, clear sky, held session, `GEOCLUE_HYBRIS_POSITION_MODE=standalone`:
 
 | | |
 |---|---|
-| SVs in view | 16 (8 GPS + 8 GLONASS) |
-| SVs with non-zero C/N0 | 1-2 at a time |
-| peak C/N0 | **31 dBHz** |
-| C/N0 samples >= 25 dBHz | 24 out of ~500 |
-| modal C/N0 | 22-23 dBHz |
-| SVs used in fix | 0 |
+| time to first fix (cold) | **11 min 50 s** |
+| time to first fix (warm, ephemeris retained) | **10 s** |
+| horizontal accuracy after 3 min | **11.8 m** |
+| satellites used / visible | 6 / 37 |
+| peak C/N0 | 34 dBHz |
 
-Four satellites sustained above roughly 30 dBHz are needed to fix. The other 14 SVs carry
-elevation and azimuth but `cN0Dbhz=0`: those are XTRA-predicted positions, not tracked signals.
-So the engine knows where to look and hears almost nothing back.
+Convergence after the first fix: 56.8 m -> 15.0 -> 13.9 -> **11.8 m**, `used` 4 -> 5 -> 6.
+
+The cold TTFF matches sledges' "~15mins due to no agps" almost exactly. There is no RF fault, no
+antenna problem, and nothing left to fix in the signal path.
+
+The `flags` column in `LocSvc_LocApiBase`'s SV table is what to read while waiting -- it explains
+a receiver that is tracking happily and still not fixing:
+
+```
+        constellation svid    cN0    elev    azim    flags
+000:              GPS  10   26.4    28.0   350.0    0x1B     0x1 = HAS_EPHEMERIS
+001:              GPS  23   29.1    28.0    28.0    0x1B     0x2 = HAS_ALMANAC
+002:              GPS  24   21.2     9.0    43.0    0x1A     0x4 = USED_IN_FIX
+009:          GLONASS  69   31.2    32.0   344.0    0x1B     0x8 = HAS_CARRIER_FREQ
+012:          GLONASS  68   25.0     4.0    25.0    0x1B
+```
+
+`0x1B` has ephemeris, `0x1A` does not. At that moment exactly four SVs had ephemeris -- two GPS
+and two GLONASS -- which is one short: four suffice within a single constellation, but a mixed
+GPS+GLONASS solution needs five, because the inter-system time offset is a fifth unknown. Watch
+the ephemeris count, not the satellite count.
 
 Read the `SatelliteChanged` tuple as **`(prn, elevation, azimuth, snr)`** --
 `hybrisprovider.cpp:131`. Getting that order wrong makes an elevation look like a spectacular
 C/N0; it cost a bogus "73 dBHz" reading here.
 
 `reportSv: At least one RF_LOSS is 0 in gps.conf, please configure it` fires every second: all ten
-`RF_LOSS_*` keys are commented out in the vendor `gps.conf`. That is a real uncalibrated-offset
-gap, but it biases *reported* C/N0, it does not deafen the receiver -- do not expect it to be the
-answer.
+`RF_LOSS_*` keys are commented out in the vendor `gps.conf`. It biases *reported* C/N0 and is
+cosmetic here -- the device fixes fine with it unset.
 
-The kernel device tree has **no GPS entries at all** for karatep or karate-common, so no LNA
-regulator or antenna GPIO is under our control; it is modem-controlled or always-on hardware.
-
-Two measurements to make next, in this order, and neither is a code change:
-
-1. **Outdoors, clear sky, same build.** Every number above was taken indoors beside a window,
-   where 20-30 dBHz is unremarkable for a phone. This is cheap and it may simply end the
-   investigation.
-2. **Android on the same handset, same spot.** It should report 35-45 dBHz on an overhead
-   satellite. If it reports ~31 as well, the port is doing its job and this is the unit's ceiling.
-   If it reports 40+, something switches the LNA on that we do not.
+Still open, and worth a look if TTFF matters: a cold start takes ~12 minutes despite
+`XTRA_FORCE_INJECT`, when valid predicted ephemeris should make it far quicker. Either the XTRA
+payload is not being accepted or it is stale. Not a blocker -- warm starts are 10 s.
 
 > Three false trails, recorded so they are not walked again: the 30 s session cycle is client
 > churn, not GNSS behaviour; `LocSvc_GnssInterface: serviceDied` is the HAL reporting that *its
 > client* disconnected, not the GNSS service crashing; and `msm_ipc_router_bind: Loc_hal_worker Do
 > not have permissions` is real but not the blocker -- running the HAL with full capabilities
 > (`CapEff: 0000003fffffffff`) clears the error and changes nothing about acquisition.
+
+### Why STANDALONE is shipped, and what it does not cost
+
+`droid-config-karatep` ships
+`sparse/etc/systemd/user/geoclue-providers-hybris.service.d/50-position-mode.conf` setting
+`GEOCLUE_HYBRIS_POSITION_MODE=standalone`. Nothing usable is given up by it:
+
+* **MS_BASED cannot work here anyway.** It needs SUPL over ofono's default data modem, which this
+  device does not have. The assisted path could never complete; the only thing MS_BASED actually
+  did was stall the engine.
+* **Assistance still happens.** XTRA and NTP injection are driven by `/etc/gps_xtra.ini` and are
+  independent of the position mode. The engine gets ephemeris and time in STANDALONE.
+* **No constellation is disabled.** `location.conf` keeps GPS, GLONASS, BeiDou, Galileo, QZSS and
+  SBAS all enabled, and the fix above used GPS and GLONASS together.
+* **The HAL's advertised capabilities are untouched.** The vendor `gps.conf` still declares
+  `CAPABILITIES=0x17` (SCHEDULING | MSB | MSA | ON_DEMAND_TIME). We decline to *request* MSB; we do
+  not remove it.
+* **Network positioning is untouched.** `mls` stays enabled -- it is a real fallback indoors, and
+  the settings UI rewrites `location.conf` anyway, so disabling it there does not stick.
+
+Revisit if mobile data ever works on this device: a real SUPL connection would make MS_BASED give
+a much faster cold fix than ~12 minutes.
+
+Fixing this properly upstream is harder than it looks, and `453b22a`'s approach does not do it.
+Keying the mode off `m_agpsOnlineEnabled` -- which is what every *other* assistance path in
+`hybrisprovider.cpp` gates on (lines 758, 860, 981, 989, 1188, 1239) -- still yields MS_BASED
+here, because `hybris\online_enabled` is `true` by default in `location.conf` even on a device
+with no data connection. That setting records what the user permits, not what the network can
+deliver. A correct upstream fix would have to test reachability rather than permission, which is
+why ours is an explicit per-device override instead.
 
 ---
 
