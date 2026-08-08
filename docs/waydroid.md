@@ -4,10 +4,11 @@ Waydroid runs a full Android system in an LXC container and renders it through t
 Wayland compositor, reusing the device's own `/vendor` HALs over binder. It is the community
 alternative to Jolla's proprietary AlienDalvik.
 
-> **Status: built, not yet verified on hardware.** Everything below the "Building" section is
-> written from the packaging sources and the upstream OTA metadata, not from a booted device.
-> There is also a known Sailfish OS 5.1 regression — see [The 5.1 problem](#the-51-problem)
-> before spending time on it.
+> **Status: installed and initialised on hardware; the container has not started yet.**
+> `waydroid init` succeeds and both images are in place, but the LXC container died on a
+> missing kernel option — see [`rca/waydroid-devpts.md`](rca/waydroid-devpts.md). The fix is
+> in the tree and awaiting a reflash. There is also a known Sailfish OS 5.1 regression — see
+> [The 5.1 problem](#the-51-problem) — which we have not reached yet.
 
 ---
 
@@ -52,6 +53,30 @@ CONFIG_NET_CLS_CGROUP=y
 CONFIG_CGROUP_NET_CLASSID=y
 ```
 
+A second round was needed once the container actually tried to start (`7b25d38ec43e`):
+
+```
+CONFIG_DEVPTS_MULTIPLE_INSTANCES=y   # required -- LXC cannot build the container's /dev without it
+CONFIG_OVERLAY_FS=y                  # writable /system and /vendor
+CONFIG_CGROUP_DEVICE=y               # mer-kernel-check, systemd
+CONFIG_MEMCG=y
+CONFIG_MEMCG_KMEM=y
+```
+
+`DEVPTS_MULTIPLE_INSTANCES` is the one that matters: without it there is no `/dev/pts/ptmx` for
+LXC to bind, the container never spawns, and the app just closes. Full write-up in
+[`rca/waydroid-devpts.md`](rca/waydroid-devpts.md).
+
+`POSIX_MQUEUE` was considered and dropped — neither Android's `init.rc` nor waydroid's
+`lxc.mount.auto` touches `/dev/mqueue`. `MACVLAN`, `VLAN_8021Q`, `IP6_NF_TARGET_MASQUERADE`,
+`CHECKPOINT_RESTORE` and the `*_DIAG` options are all things `lxc-checkconfig` will flag and none
+of them are used: waydroid networks over veth, and `waydroid-net.sh:89` only reaches for
+ip6tables when IPv6 is enabled, which it is not by default.
+
+`lxc-checkconfig` is the right tool for this, with one catch: it shells out to `zgrep`, which the
+device does not have, so every line reports "missing". Decompress first —
+`zcat /proc/config.gz > /run/kconfig && CONFIG=/run/kconfig lxc-checkconfig`.
+
 The binder nodes **must** be static. Linux 3.18 predates binderfs (5.0), so waydroid's
 `allocBinderNodes()` path — which adds nodes at runtime by `ioctl`-ing
 `/dev/binderfs/binder-control` — cannot work here. `probeBinderDriver()` then finds the nodes
@@ -71,13 +96,37 @@ must match the running kernel exactly or `wlan0` never appears.
 
 ## Packages
 
-Two repos, both plain clones under `hybris/mw/` (not `repo`-managed, not forked — we carry no
-changes of our own yet):
+Two repos, both plain clones under `hybris/mw/` (not `repo`-managed):
 
 | Repo | Gives |
 |---|---|
-| [`sailfishos-open/waydroid`](https://github.com/sailfishos-open/waydroid) | `waydroid`, `waydroid-settings`, `waydroid-gbinder-config-{hybris,mainline}` |
+| [`Sailfish-on-karatep/waydroid`](https://github.com/Sailfish-on-karatep/waydroid) — our fork, branch `hybris-18.1`, `upstream` = `sailfishos-open` | `waydroid`, `waydroid-settings`, `waydroid-gbinder-config-{hybris,mainline}` |
 | [`sailfishos-open/waydroid-sensors`](https://github.com/sailfishos-open/waydroid-sensors) | `waydroid-sensors` — a sensorfw↔gbinder bridge daemon |
+
+### Why `waydroid` is forked
+
+`sailfishos-open` has been pinned to 1.5.4 since June 2025 and upstream is 73 commits further
+on, at **1.6.3**. The fork bumps the submodule and carries a third patch. What 1.6.x brings that
+we want: the **notification manager** (Android notifications surfaced on the host — started from
+`session_manager.py:109`, independently of `user_manager`, so the fork's patch 0001 does not
+disable it), `waydroid bugreport`, correct handling of an Android-side reboot or shutdown,
+logfile rotation, and a run of init/DBus race fixes.
+
+Nothing in the packaging had to move: `make install` gains four files and they all land under
+`%{_prefix}/lib/waydroid`, which `%files` already globs. Patch 0001 needed a context-only rebase.
+
+**`mb2` takes the version from `git describe`, not from the spec.** Bumping `Version:` to 1.6.3
+alone produced `waydroid-1.5.4+git1+hybris.18.1.…`, because the newest reachable tag was still
+`1.5.4+git1` — and that RPM would have been *refused* as an upgrade, since `hybris` sorts before
+`main`. Tag the fork (`1.6.3+git1`, matching sailfishos-open's own convention) before building.
+
+### Patch 0003 — overlays on a pre-4.0 kernel
+
+`mount.py` joins the lower layers with `:`, but overlayfs only learned to stack several lower
+layers in 4.0. On 3.18 `lowerdir=a:b` is looked up as one literal path, the mount fails,
+`images.py:167` writes `mount_overlays = False` into `waydroid.cfg` and the port silently loses
+its writable `/system` and `/vendor`. The patch folds the extra lower layers into the upper layer
+when the kernel is too old. See [`rca/waydroid-devpts.md`](rca/waydroid-devpts.md#also-found-same-investigation).
 
 Both carry upstream as a **git submodule**, and both do their patching with
 `%autosetup -p1 -n %{name}-%{version}/upstream`.
@@ -137,7 +186,7 @@ The `--recurse-submodules` on the pull matters: a plain `git pull` advances the 
 recorded submodule commit without checking the submodule out, so `upstream/` stays at the old
 revision and the build quietly produces the *previous* waydroid version.
 
-We build **1.5.4**. Chum ships only **1.4.3+git3**, and 1.5.0+ is what handles the Android 13
+We build **1.6.3**. Chum ships only **1.4.3+git3**, and 1.5.0+ is what handles the Android 13
 system images the OTA channel now serves (deathmist, 2025-03-26). Prefer ours.
 
 ### Not in the image
@@ -165,10 +214,20 @@ ssu ar chum https://repo.sailfishos.org/obs/sailfishos:/chum/5.1_aarch64/
 zypper ref
 zypper in lxc dnsmasq python3-gbinder python3-gobject python3-dbus
 # then the locally built RPMs, copied to the device:
-rpm -Uvh waydroid-sensors-*.rpm waydroid-1.5.4*.rpm waydroid-settings-*.rpm
+rpm -Uvh waydroid-sensors-*.rpm waydroid-1.6.3*.rpm waydroid-settings-*.rpm
 ```
 
-Our 1.5.4 outranks Chum's 1.4.3 in version comparison, so zypper will not pull theirs over ours.
+Our 1.6.3 outranks Chum's 1.4.3 in version comparison, so zypper will not pull theirs over ours.
+
+A reflash destroys all of this: `hybris-updater-unpack.sh:6` does `rm -rf /data/.stowaways/sailfishos`,
+which takes `/home/waydroid` and its ~2 GB of images with it. Rename it out of the way from the
+recovery shell first — it is the same filesystem, so this costs nothing:
+
+```sh
+mv /data/.stowaways/sailfishos/home/waydroid /data/waydroid-keep
+# ... install, boot, reinstall the packages, then ...
+rm -rf /home/waydroid && mv /data/waydroid-keep /home/waydroid
+```
 
 Then, as root:
 

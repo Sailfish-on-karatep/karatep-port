@@ -97,6 +97,7 @@ real SIM is available.
 | [`docs/porting-notes.md`](docs/porting-notes.md) | Accumulated device knowledge: partition map, fixes already in the tree, known workarounds, how to debug the boot. |
 | [`docs/rca/`](docs/rca/) | Root-cause write-ups for bugs that were properly diagnosed. |
 | [`docs/waydroid.md`](docs/waydroid.md) | Running Android apps via Waydroid: the kernel options it needs, how the packages are built, and the Sailfish OS 5.1 regression to be aware of first. |
+| [`docs/rca/waydroid-devpts.md`](docs/rca/waydroid-devpts.md) | Why the Waydroid container refused to start: `CONFIG_DEVPTS_MULTIPLE_INSTANCES`, plus the overlayfs limitation found alongside it. |
 | [`docs/hadk-compliance.md`](docs/hadk-compliance.md) | Chapter-by-chapter audit of this port against the HADK: what complies, what was fixed, and which deviations are deliberate. |
 | [`docs/useful-commands.md`](docs/useful-commands.md) | Short command reference (rebooting to fastboot/recovery from Sailfish, etc.). |
 | [`manifests/local_manifests.xml`](manifests/local_manifests.xml) | The `repo` local manifest. Copy to `$ANDROID_ROOT/.repo/local_manifests/`. |
