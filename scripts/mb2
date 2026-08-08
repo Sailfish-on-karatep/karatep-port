@@ -1,0 +1,3 @@
+#!/bin/bash
+export PLATFORM_SDK_ROOT="/opencloud/SailfishOS"
+exec /opencloud/SailfishOS/sdks/mersdk/sdk-chroot mb2 "$@"
