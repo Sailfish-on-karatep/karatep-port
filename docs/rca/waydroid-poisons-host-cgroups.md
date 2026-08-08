@@ -95,56 +95,82 @@ libprocessgroup: Failed to apply CameraServiceCapacity task profile: No space le
 init: Service 'vendor.camera-provider-2-4' (pid 1522) exited with status 1
 ```
 
-## Status: partially fixed
+## A measurement trap: `kill -9` is not a valid reproduction
 
-Writing valid values into the poisoned cpusets removes the `ENOSPC`:
+The obvious way to test a fix is to kill the provider and watch it come back.
+**It never comes back on this port, with or without Waydroid.** Control run on a
+clean boot, flat cpuset hierarchy, Waydroid never started:
+
+```
+$ kill -9 1549
+$ ps aux | grep provider@2.4
+ 1549 camerase [provider@2.4-se]            # zombie
+$ journalctl -b | grep camera-provider
+                                            # nothing. init never even tried.
+```
+
+`SIGKILL` leaves an unreaped zombie parented to droid-hal-init and init does not
+restart the service at all. Any conclusion drawn from a `kill -9` test about the
+camera stack is therefore an artefact of the test.
+
+The real fault path is a *graceful* restart through init — which is what the
+user's original incident showed, the provider respawning every five seconds and
+failing on the task profile each time. Use `setprop ctl.restart
+vendor.camera-provider-2-4` to exercise it.
+
+## Fix: `cgroup.clone_children` on the cpuset root
+
+cgroup v1 has a per-cgroup flag that makes a newly created child inherit its
+parent's `cpus`/`mems`, and the flag itself propagates to children. Setting it
+once on the cpuset root means everything the container creates comes up
+populated instead of empty — including cgroups nobody has enumerated:
 
 ```sh
-for d in /sys/fs/cgroup/cpuset/*/; do
-    case "$d" in *lxc.*) continue;; esac
-    echo 0   > "$d/cpuset.mems"
-    echo 0-7 > "$d/cpuset.cpus"
-done
+echo 1 > /sys/fs/cgroup/cpuset/cgroup.clone_children
 ```
 
-`0-7` rather than the device tree's `camera-daemon 4-7` / `background 4-6` on
-purpose: an all-CPUs cpuset is semantically identical to the "no cpuset exists"
-state that works today, so this restores the join without changing host
-scheduling behaviour.
-
-That is confirmed to stop the libprocessgroup error — but the provider **still**
-exits 1 afterwards, now without a cpuset complaint, and `init` eventually gives
-up retrying. Both `provider@2.4-service` and `mm-qcamera-daemon` are left as
-unreaped zombies parented to droid-hal-init:
+Verified on device. Before, a fresh child was born empty; with the flag set:
 
 ```
-1497 camerase [provider@2.4-se]     State: Z (zombie)   PPid: 1159
-1629 camera   [mm-qcamera-daem]     State: Z (zombie)   PPid: 1159
+$ mkdir /sys/fs/cgroup/cpuset/zz-probe
+cpus=[0-7] mems=[0] clone=[1]
 ```
 
-with `init` looping on `Failed to kill process cgroup uid 1047 pid N in 208ms,
-1 processes remain`. So the cpuset is the *first* fault, not the only one — the
-camera stack cannot be brought back within a boot once Waydroid has run. Only a
-reboot restores it.
+and after starting a Waydroid session, every cgroup the container created came up
+correct rather than empty:
 
-The remaining failure is not yet root-caused. Candidates, untested:
+```
+background/ camera-daemon/ foreground/ restricted/ system-background/ top-app/
+                                              all cpus=[0-7] mems=[0]
+```
 
-- the container's own `logd` (a second instance, seen alongside the host's) and
-  its Android services competing for `/dev/socket/*` or hwservicemanager names;
-- state left in the camera hardware by the container's camera HAL bridge;
-- droid-hal-init wedged in `KillProcessGroup`, unable to reap, so it will not
-  cleanly restart the service pair.
+Inheriting `0-7` is deliberate, rather than the device tree's tuned values
+(`camera-daemon 4-7`, `background 4-6`). An all-CPUs cpuset is semantically the
+same as the "no cpuset exists" state this port has always run with, so the
+failing join is restored without changing host scheduling behaviour.
 
-## What a real fix has to do
+Shipped as `android-cpuset-inherit.service` in droid-config, ordered
+`Before=droid-hal-init.service` so the flag is set before any Android cgroup
+exists.
 
-Populating cpusets after the fact is a workaround for a containment failure. The
-container should not be able to write the host's cgroup hierarchy at all. The
-proper fix is to give the container its own cgroup namespace
-(`lxc.namespace.clone = cgroup`, LXC ≥ 3.0 — the device has 6.0.3), so its
-`mount -t cgroup` sees a namespaced root and its `mkdir`s land in
-`lxc.payload.waydroid/` where they belong. That needs testing: Android's init may
-not tolerate a namespaced cgroup root, and waydroid's own cgroup handling assumes
-the current layout.
+## Why not contain the container instead
+
+Populating cpusets defends the host; it does not stop the container reaching
+into the host's hierarchy. The clean fix would be a cgroup namespace
+(`lxc.namespace.clone = cgroup`), so the container's `mount -t cgroup` sees a
+namespaced root and its `mkdir`s land inside `lxc.payload.waydroid/`.
+
+**That is not available here.** `CLONE_NEWCGROUP` was added in Linux 4.6 and this
+kernel is 3.18. LXC 6.0.3 on the device supports the option; the kernel cannot
+honour it. So host-side defence is the only option on this port, and the
+`clone_children` flag is the cheapest form of it.
+
+## Still open
+
+- The container's own `logd` runs alongside the host's — harmless so far, but
+  noted.
+- Inside Waydroid the camera app reports no cameras; the container's camera HAL
+  bridge is a separate problem from this one.
 
 ## See also
 
