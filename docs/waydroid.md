@@ -6,18 +6,49 @@ alternative to Jolla's proprietary AlienDalvik.
 
 > **Status: running on hardware, with gaps.** The container boots Android, touch works, and it
 > survives a display-size change. Both cameras enumerate inside it and the camera app opens them.
+> Hardware video decode and encode work, GPU acceleration is the real Adreno driver, the
+> microphone records, and all eight of the host's sensors are bridged through.
 >
-> Getting here took four fixes: `CONFIG_DEVPTS_MULTIPLE_INSTANCES` for the container to start at
+> Getting here took five fixes: `CONFIG_DEVPTS_MULTIPLE_INSTANCES` for the container to start at
 > all ([rca](rca/waydroid-devpts.md)); taking the `wl_shell` path instead of xdg-shell, which is
 > what the 5.1 regression actually was ([rca](rca/waydroid-touch-xdg-shell.md)); `cgroup.clone_children`
 > so the container stops killing the *host's* camera ([rca](rca/waydroid-poisons-host-cgroups.md));
-> and staging the host's camera HAL under the name the container looks for
-> ([rca](rca/waydroid-camera-hal-name.md)).
+> staging the host's camera HAL under the name the container looks for
+> ([rca](rca/waydroid-camera-hal-name.md)); and feeding the device's vendor video properties back
+> into the container, without which **no video plays at all**
+> ([rca](rca/waydroid-video-decode-split-mode.md)).
 >
-> Still open: video recorded inside Waydroid does not play back, and `configureStreams` rejects
-> the JPEG stream — the install pairs a lineage-20 (Android 13) system image with a lineage-18.1
-> (Android 11) HALIUM_11 vendor, so an Android 13 framework is negotiating with a
-> `camera.device@3.3` HAL. GPS and vibration are wired but unverified.
+> Still open: `configureStreams` rejects the JPEG stream — the install pairs a lineage-20
+> (Android 13) system image with a lineage-18.1 (Android 11) HALIUM_11 vendor, so an Android 13
+> framework is negotiating with a `camera.device@3.3` HAL. Per-app network accounting and data
+> restrictions are permanently unavailable (eBPF needs a 4.9+ kernel). GPS is not bridged at all,
+> and Bluetooth is not exposed to the container.
+
+---
+
+## Feature status
+
+Measured on the device, 2026-08-09, container up 17 h.
+
+| Feature | State | Evidence / note |
+|---|---|---|
+| Touch | ✅ | `wayland_touch` at input device 5; survives a display-size change |
+| GPU acceleration | ✅ | Real driver, not swiftshader: `GLES: Qualcomm, Adreno (TM) 505, OpenGL ES 3.2 V@0502.0`, `ro.hardware.egl=adreno`. Waydroid bind-mounts the host's `/vendor/lib{,64}/egl` into the container |
+| Video decode (HW) | ✅ | `OMX.qcom.video.decoder.avc`, 1080p, after the split-mode fix — [rca](rca/waydroid-video-decode-split-mode.md) |
+| Video encode (HW) | ✅ | `OMX.qcom.video.encoder.avc`; recordings are valid 1080p H.264 Baseline / AAC |
+| Camera (enumerate + preview) | ✅ | 2 devices, `ICameraProvider/legacy/0`, provider stable — [rca](rca/waydroid-camera-hal-name.md) |
+| Camera (JPEG capture stream) | ❌ | `configureStreams: Stream 1: DataSpace override not allowed for format 0x21` — Android 13 framework vs `camera.device@3.3` |
+| Microphone | ✅ | Container recording contains real captured audio (296 960 samples, mean −53.5 dB, max −32.9 dB — not digital silence) |
+| Audio out | ✅ | `android.hardware.audio@4.0::IDevicesFactory` up, routed to the host's PulseAudio via `waydroid.pulse_runtime_path=/run/xdg/pulse` |
+| Headset / BT SCO / A2DP routing | ⚠️ | The container's audio policy declares wired headset, headphones, BT SCO and A2DP ports, but all of them are Waydroid's *stub* devices — the real routing decision belongs to the host's PulseAudio, so Android's in-container routing UI is cosmetic. Untested with a headset plugged in |
+| Sensors | ✅ | 8/8 bridged by `waydroid-sensors` through Sailfish `sensorfw`: accelerometer, gyroscope, light, magnetometer (+uncalibrated), device orientation, pressure, proximity. Humidity / step counter / temperature correctly report "not found" — the device has none |
+| Vibration | ✅ | `android.hardware.vibrator@1.0-service.waydroid`, `mVibratorInfoLoadSuccessful=true`, TOUCH vibrations logged `status: finished` from launcher and virtual keys. No amplitude control (`mCapabilities=[]`) |
+| Networking | ✅ | veth up, `192.168.240.112`, ping and DNS out to the internet both work |
+| Per-app network accounting / data saver | ❌ | **Structurally impossible here.** Android 13's `netd` does this with eBPF; kernel 3.18 has no `BPF_PROG_TYPE_CGROUP_SKB`, so every call returns `Function not implemented (code 38)`. Constant `NetworkStats` / `NetworkPolicy` / `TrafficController` log spam is this and only this. Traffic itself is unaffected |
+| GPS | ❌ | Not bridged. The `gps`, `fused` and `passive` providers exist but sit at `ProviderRequest[OFF]` with `mStarted=false`, and **no `android.hardware.gnss@*::IGnss` is registered in the container at all**. There is no gnss bridge daemon the way there is `waydroid-sensors` for sensorfw |
+| Bluetooth | ❌ | `state: OFF`, no `android.hardware.bluetooth` HAL in the container. Not exposed by Waydroid |
+| Clipboard | ⚠️ | `vendor.waydroid.clipboard@1.0::IWaydroidClipboard` is registered; host↔container copy/paste not exercised |
+| `/dev/video` bind | ⚠️ | LXC logs `Failed to mount "/dev/video" onto ".../dev/video"` and leaves a 0-byte regular file there, because on karatep `/dev/video` is a *directory* of `venus_dec` / `venus_enc` symlinks. Harmless in practice — the OMX components open `/dev/video32` and `/dev/video33` directly, and both work |
 
 ---
 
@@ -136,6 +167,21 @@ layers in 4.0. On 3.18 `lowerdir=a:b` is looked up as one literal path, the moun
 `images.py:167` writes `mount_overlays = False` into `waydroid.cfg` and the port silently loses
 its writable `/system` and `/vendor`. The patch folds the extra lower layers into the upper layer
 when the kernel is too old. See [`rca/waydroid-devpts.md`](rca/waydroid-devpts.md#also-found-same-investigation).
+
+### Patch 0004 — propagate the host's vendor video properties
+
+A Halium container mounts a generic vendor image over `/vendor` and rbinds the device's real
+vendor partition at `/vendor_extra`, so it keeps loading the device's own vendor *libraries*
+while losing the vendor *properties* that tell those libraries what this SoC's firmware can do.
+On karatep the missing `vendor.vidc.disable.split.mode=1` made `libOmxVdec` ask Venus for a
+split DPB/OPB it cannot do, and **no video decoded at all**. The patch adds the `vendor.vidc.` /
+`vidc.` namespaces to the host properties `make_base_props()` already copies across. Values are
+copied, never hardcoded, so it is a no-op on a device that sets none — nothing about it is
+specific to karatep or to `hybris-18.1`. Full write-up in
+[`rca/waydroid-video-decode-split-mode.md`](rca/waydroid-video-decode-split-mode.md).
+
+It takes effect at `waydroid init` / `waydroid upgrade`, **not** at session start, so an existing
+install needs `waydroid upgrade -o` once after the package is installed.
 
 Both carry upstream as a **git submodule**, and both do their patching with
 `%autosetup -p1 -n %{name}-%{version}/upstream`.
