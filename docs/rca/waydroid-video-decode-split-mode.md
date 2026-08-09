@@ -125,16 +125,35 @@ the vendor's own component and would happen on a matched pair too.
 
 ## Fix
 
-Feed the properties back into the container — `rpm/0004-propagate-host-vendor-video-props.patch`
-in [`Sailfish-on-karatep/waydroid`](https://github.com/Sailfish-on-karatep/waydroid).
+Feed the properties back into the container, split across two repos so that
+neither holds the other's knowledge.
+
+**Generic half** — `rpm/0004-propagate-host-vendor-video-props.patch` in
+[`Sailfish-on-karatep/waydroid`](https://github.com/Sailfish-on-karatep/waydroid).
 `make_base_props()` already copies a handful of host properties the container
 needs (`ro.hardware.gralloc`, `ro.opengles.version`, `ro.product.vendor.*`,
-`ro.vendor.build.fingerprint`); the patch adds the `vendor.vidc.` / `vidc.`
-namespaces to that list, via a new `props.host_get_prefixed()` helper.
+`ro.vendor.build.fingerprint`); the patch adds "every host property under a
+declared namespace" to that list, via a new `props.host_get_prefixed()` helper.
+It contains **no SoC knowledge**: with no declaration present the list is empty
+and nothing is propagated, so it is inert until opted into. Skipped for
+`MAINLINE`, which has no host vendor partition to copy from.
 
-Values are **copied, never hardcoded**, so each device keeps whatever its own
-vendor partition decided and the change is a no-op where the host sets nothing.
-It is skipped for `MAINLINE`, which has no host vendor partition to copy from.
+**Device half** — `sparse/etc/waydroid-extra/vendor-props.cfg` in
+[`droid-config-karatep`](https://github.com/Sailfish-on-karatep/droid-config-karatep):
+
+```ini
+[host_props]
+propagate_prefixes = vendor.vidc., vidc.
+```
+
+`/etc/waydroid-extra/` (falling back to `/usr/share/waydroid-extra/`) is
+waydroid's own convention for things the distribution or device adaptation
+supplies — it is already where `preinstalled_images_paths` and `channels.cfg`
+live — so this is waydroid's native extension point rather than a workaround.
+
+Only *namespaces* are named there. Values are read from the running host at
+`waydroid init` / `upgrade` time, so the file never needs touching when
+`vendor.prop` changes, and the same file works on any msm8937-era Qualcomm port.
 
 On karatep it brings nine properties across, the decoder fix plus the encoder
 tuning that was equally missing:
@@ -165,23 +184,33 @@ bind-mounted onto `/vendor/waydroid.prop`, which Android init imports.
 Waydroid's own `[properties]` section in `waydroid.cfg` is applied *after* this,
 so a device that needs to override one of the propagated values still can.
 
-### Is this device-specific?
+### Which half is device-specific?
 
-No — and this matters if it is ever offered upstream.
+Three separable layers, and they do not have the same answer. This is what
+decides where each piece lives, and what could honestly be offered upstream.
 
-- **The mechanism is generic.** `generate_nodes_lxc_config()` does
-  `make_entry("/vendor", "vendor_extra", ...)` under `if args.vendor_type != "MAINLINE"`,
-  so *every* Halium vendor type — not just `HALIUM_11` — replaces `/vendor` and
-  loses the host's vendor properties while still using the host's vendor
-  libraries. Nothing here is tied to Android 11 or to `hybris-18.1`.
-- **The value is device-specific**, which is exactly why the patch copies rather
-  than hardcodes. `vendor.vidc.disable.split.mode` is `1` here because msm8937's
-  Venus cannot split DPB/OPB; a device whose firmware can will have it unset and
-  get nothing.
-- **The prefix list is SoC-specific.** `vendor.vidc.` / `vidc.` are Qualcomm
-  names. On a non-Qualcomm host nothing matches and the patch does nothing —
-  correct, but it also means other SoC families would need their own entries
-  before they benefit. That is the honest caveat to declare with any PR.
+- **The mechanism is generic, and not `hybris-18.1`-specific.**
+  `generate_nodes_lxc_config()` does `make_entry("/vendor", "vendor_extra", ...)`
+  under `if args.vendor_type != "MAINLINE"`, so *every* Halium vendor type — not
+  just `HALIUM_11` — replaces `/vendor` and loses the host's vendor properties
+  while still using the host's vendor libraries. Nothing is tied to Android 11.
+  This half is upstreamable as-is.
+- **The values were already device-specific and already in the right place.**
+  All nine live in `device/lenovo/karate-common/vendor.prop` (lines 94–102), in
+  `android_device_lenovo_karate-common`. Nothing had to move: the patch reads
+  them from the running host, which is that file's own output.
+- **The prefix list is SoC-specific**, so it is *not* in the waydroid fork.
+  `vendor.vidc.` / `vidc.` are Qualcomm names; a Mediatek or Exynos port needs
+  different ones. Hardcoding them in waydroid would mean a table growing one
+  entry per SoC family forever, and every adaptation waiting on a waydroid
+  release to add its own. It lives in `droid-config-karatep` instead.
+
+Worth knowing for context: waydroid upstream *does* already carry SoC-specific
+knowledge — `generate_nodes_lxc_config()` has `/dev/kgsl-3d0` (Qualcomm),
+`/dev/mali0` (Mali), `/dev/pvr_sync` (PowerVR) and a block commented
+"Media dev nodes (for Mediatek)". A hardcoded prefix table would not have been
+out of keeping with the surrounding code. Keeping it out is a deliberate choice
+to hold the line between the two repos, not a claim that upstream would refuse it.
 
 Deliberately **not** propagated: `vendor.video.disable.ubwc` and
 `vendor.gralloc.enable_fb_ubwc`, which the host also sets. Those steer the
