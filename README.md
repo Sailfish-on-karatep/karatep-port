@@ -108,6 +108,7 @@ something is known to be broken.
 | [`docs/rca/waydroid-poisons-host-cgroups.md`](docs/rca/waydroid-poisons-host-cgroups.md) | Why running Waydroid kills the Sailfish camera until the next reboot: the container writes the host's cgroup v1 cpuset hierarchy. |
 | [`docs/rca/waydroid-touch-xdg-shell.md`](docs/rca/waydroid-touch-xdg-shell.md) | Why Waydroid touch is dead under lipstick: SFOS 5.1 added xdg_shell, Waydroid prefers it over wl_shell, and lipstick's xdg path does not route touch. |
 | [`docs/rca/waydroid-camera-hal-name.md`](docs/rca/waydroid-camera-hal-name.md) | Why Waydroid's camera provider crash-looped every 5 s: the HAL is probed as camera.waydroid.so, not camera.qcom.so. |
+| [`docs/waydroid-gps-bluetooth.md`](docs/waydroid-gps-bluetooth.md) | Why neither GPS nor Bluetooth reaches the Waydroid container, and why only one of the two is worth fixing. |
 | [`docs/rca/waydroid-video-decode-split-mode.md`](docs/rca/waydroid-video-decode-split-mode.md) | Why no video plays inside Waydroid: the container's own `/vendor` drops the device's video tuning properties, so the decoder asks Venus for split DPB/OPB and the firmware rejects the session. |
 | [`docs/rca/sphal-hidl-memory.md`](docs/rca/sphal-hidl-memory.md) | Why the camera app aborts at the end of video playback: the sphal namespace cannot reach the VNDK APEX, so HIDL shared memory never loads. |
 | [`docs/hadk-compliance.md`](docs/hadk-compliance.md) | Chapter-by-chapter audit of this port against the HADK: what complies, what was fixed, and which deviations are deliberate. |
