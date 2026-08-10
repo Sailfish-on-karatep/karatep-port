@@ -110,11 +110,61 @@ with `adb`; `manual-install/` extracts the rootfs tarball into `/data/.stowaways
 
 ## Hardware Adaptation Checklist
 
-📋 **Not yet worked through.** 25 runtime-verification items (thermal/dsme, watchdog, usb-moded,
-buteo-mtp, ssu config, vibra, suspend/resume via iphb, volume & power keys, proximity and ALS,
-LED, CSD, double tap, zram, act-dead, extra filesystems). Several already have known problems
-recorded in [porting-notes](porting-notes.md) — WLAN/`bluebinder`, 3.5 mm routing, mobile data,
-fingerprint. This is the natural next body of work once the port boots reliably.
+Worked through against the running device on 2026-08-11 (Sailfish 5.1.0.11, kernel
+`3.18.124-perf-g3a06ccbcfede`). Every verdict below rests on a command run on hardware, on the
+defconfig, or on reading the consuming daemon's source — not on inspection of our own config.
+
+| # | Item | Status |
+|---|---|---|
+| 1 | Thermal sensor config for dsme | 🔧 `/etc/dsme` was empty, `battery_temperature` returned the `-9999` no-data sentinel. Fixed by `sparse/etc/dsme/thermal_sensor_karatep.conf` (battery / core / surface) |
+| 2 | memnotify patch + config for mce | 🔧 all four thresholds were 0, `get_memory_level` returned `unknown`. **No kernel patch needed** — `memnotify.c` wants `/dev/memnotify`, but `mempressure.c` needs only `CONFIG_MEMCG`, already set for Waydroid. Fixed by `sparse/etc/mce/60-karatep-memnotify.conf` |
+| 3 | Watchdog driver + dsme | 📋 **broken.** No `/dev/watchdog*`, no `/sys/class/watchdog`, no `CONFIG_WATCHDOG*`. `CONFIG_MSM_WATCHDOG_V2=y` is the kernel-stuck hardware watchdog and exposes no chardev, so dsme falls through to *"Could not open any watchdog files"*. Nothing reboots the device if userspace hangs |
+| 4 | usb-moded | ✅ active, mode `developer_mode`, cable state `connected`, dyn-modes present |
+| 5 | USB diag mode | ➖ optional, untested |
+| 6 | USB gadget + buteo-mtp | ❓ `buteo-mtp-qt5` and `mtp_mode-droid.ini` present, legacy `android_usb` gadget (not ConfigFS). Never connected to a host as MTP — doing so drops the RNDIS link every debug session runs over |
+| 7 | ssu config files | ✅ `ssu` and `ssu-sysinfo` agree (karatep / K6 Note / Lenovo, 5.1.0.11) |
+| 8 | Vibra driver | ✅ Android `timed_output` at `/sys/class/timed_output/vibrator`, driven by `ngfd-plugin-native-vibrator` + `libhybris-libvibrator`. No `ff-memless` needed |
+| 9 | Suspend | 📋 **broken.** 25 successes against 4423 failures; 4125 of those are `suspend_noirq` vetoed by `qpnp-vadc-14` with `-EBUSY`, plus 256 `failed_freeze`. mce reported 181 s suspended in 34 786 s of uptime. Measured on USB, which holds `msm_otg`/`smbchg` wakelocks and explains why few attempts *start* — but not the noirq vetoes, which are a driver fault. Needs a run on battery to get a clean figure |
+| 10 | Resume via iphb | ❓ plumbing is present — dsme's `iphb.so` loads and the socket `/dev/shm/iphb` exists — but it cannot be exercised while #9 fails |
+| 11 | Volume key probing & policy | ❓ `gpio-keys` on event3; none of the three policy behaviours tested |
+| 12 | Power key | ✅ `qpnp_pon` on event0, dsme `pwrkeymonitor.so` loaded, long-press reaches the power menu |
+| 13 | Proximity sensor in suspend | ❓ sensorfw advertises `proximitysensor` and mce is set `on_demand=true`, but it has never been read. Blocked behind #9 regardless |
+| 14 | Ambient light sensor | ⚠️ verified only indirectly, by measurement — mce scales the LED by an ALS-derived level and the LED tracks room brightness. Zero-lux-in-darkness and power-up latency untested |
+| 15 | LED | ✅ see [porting-notes](porting-notes.md#notification-led); `60-karatep-led.ini` pins the backend and the ALS curve |
+| 16 | Proximity blanking during a call | ❓ needs a usable SIM |
+| 17 | CSD config | 🔧 hardware features were declared but `Hall=1` was wrong — no hall device in `/proc/bus/input/devices`, only `h2w`/`wfd` in `/sys/class/switch`, no driver in the defconfig or either device tree, and csd's own probe path `/proc/irq/396/sensor_hall` is absent — and `LedType=RGB` made `VerificationLED` unpassable on a single white LED. Factory and run-in sets were falling back to csd's built-in lists. All three fixed in `hw-settings.ini` |
+| 18 | abootsettings | ✅ `abootsettings.so` present |
+| 19 | Double tap | ⚠️ half-wired. `doubletap/mode` is 2 and `use_fake_double_tap` is true, so mce synthesises taps from touch — but mce's `doubletap.so` drives `/sys/class/i2c-adapter/i2c-3/3-0020/block_sleep_mode`, a Synaptics path that does not exist here. The real controller is `fts_ts` at `3-0038`, which exposes `wake_gesture` (reads `0xC0`) that nothing configures. Never tested by hand |
+| 20 | zram | ✅ `CONFIG_ZRAM=y`, `zram0` active at 512 MB |
+| 21 | Suspicious logging at boot/shutdown | 📋 **cannot be inspected.** The `SMBCHG` charger driver evicts the ring buffer within ~45 min of a 9.7 h uptime, ~75% of the surviving log being its own messages (plus `of_batterydata_get_best_profile` re-parsing the battery profile 140 times). 78 s after a fresh boot the log already started at t=13.4 s. The journal would settle the userspace half but needs root |
+| 22 | usb-moded vs Android USB in `*.rc` | ✅ `vendor.usb-hal-1-2` is disabled, and the `android_usb` writes left in `/vendor/etc/init/hw/init.qcom.usb.rc` sit behind `on property:sys.usb.config=*` triggers usb-moded never sets. The `iSerial`/`iManufacturer` writes are the sanctioned Android-side serial logic |
+| 23 | Touch reporting | ⚠️ works in daily use, but the checklist's specific concern — display power cycling with a finger already on the screen — is untested |
+| 24 | Act dead mode | ❓ `jolla-actdead-charging` installed and `actdead.target` exists, but act-dead has never been entered |
+| 25 | Extra filesystems | ⚠️ F2FS, VFAT, FUSE and OVERLAY are in. **BTRFS, UDF, NFS, CIFS, exFAT/NTFS, ISO9660 and SQUASHFS are not.** BTRFS is separately why factory reset cannot work → [rca](rca/factory-reset-does-nothing.md) |
+
+Items 1, 2 and 17 are fixed in `droid-config-karatep` but **have not yet been exercised on
+hardware** — installing into `/etc` needs root, and no root password is set on this device. They
+are verified against the parsers that consume them (`tsg_objects_read_config()`,
+`gconf_client_load_values()`, csd's QSettings keys), not merely against expectation. To confirm
+after the next image build:
+
+```sh
+dbus-send --system --print-reply --dest=com.nokia.thermalmanager \
+  /com/nokia/thermalmanager com.nokia.thermalmanager.battery_temperature   # want a real value, not -9999
+dbus-send --system --print-reply --dest=com.nokia.mce \
+  /com/nokia/mce/request com.nokia.mce.request.get_memory_level            # want "normal", not "unknown"
+ssu-sysinfo -f | grep CoverSensor                                          # want no output
+```
+
+The three genuinely broken items are #3 (watchdog), #9 (suspend) and #21 (log spam); #25 is a
+defconfig gap.
+
+The porter archive has almost nothing on any of them (control search `hybris-boot`: 2883 hits,
+so the search itself works). `memnotify` and `mempressure` both return **zero** hits, so the mce
+side of #2 appears to be novel here. `qpnp-vadc` returns a single 2016 line — and it is about a
+*wakelock* of that name, not a `suspend_noirq` veto, so #9 has no prior art either. The closest
+match for the shape of #9 is Thaodan and voidanix[m] on 2022-08-21 debugging
+`cnss_pci_suspend_noirq()` returning `-11`, which is a different driver.
 
 ---
 
