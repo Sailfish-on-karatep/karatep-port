@@ -21,8 +21,8 @@ alternative to Jolla's proprietary AlienDalvik.
 > Still open: `configureStreams` rejects the JPEG stream — the install pairs a lineage-20
 > (Android 13) system image with a lineage-18.1 (Android 11) HALIUM_11 vendor, so an Android 13
 > framework is negotiating with a `camera.device@3.3` HAL. Per-app network accounting and data
-> restrictions are permanently unavailable (eBPF needs a 4.9+ kernel). GPS is not bridged at all,
-> and Bluetooth is not exposed to the container.
+> restrictions are permanently unavailable (eBPF needs a 4.9+ kernel). GPS now works through a bridge to the
+> host's positioning stack, and Bluetooth is not exposed to the container.
 
 ---
 
@@ -45,7 +45,7 @@ Measured on the device, 2026-08-09, container up 17 h.
 | Vibration | ✅ | `android.hardware.vibrator@1.0-service.waydroid`, `mVibratorInfoLoadSuccessful=true`, TOUCH vibrations logged `status: finished` from launcher and virtual keys. No amplitude control (`mCapabilities=[]`) |
 | Networking | ✅ | veth up, `192.168.240.112`, ping and DNS out to the internet both work |
 | Per-app network accounting / data saver | ❌ | **Structurally impossible here.** Android 13's `netd` does this with eBPF; kernel 3.18 has no `BPF_PROG_TYPE_CGROUP_SKB`, so every call returns `Function not implemented (code 38)`. Constant `NetworkStats` / `NetworkPolicy` / `TrafficController` log spam is this and only this. Traffic itself is unaffected |
-| GPS | ❌ | Not bridged, but everything above the HAL is present — providers registered, `feature:android.hardware.location.gps` declared. Only `IGnss` is missing from the container's hwbinder. Needs a `waydroid-gnss` host daemon mirroring `waydroid-sensors` → [design](waydroid-gps-bluetooth.md#gps--a-missing-hal-nothing-else) |
+| GPS | ✅ | Works, via [`waydroid-gnss`](https://github.com/Sailfish-on-karatep/waydroid-gnss) bridging the container's `IGnss` to the host's Geoclue, so Sailfish keeps the HAL and both stacks can position at once. The container previously reached GPS by *seizing* the host HAL through `hosthals.xml` → [design](waydroid-gps-bluetooth.md#gps--solved-via-a-bridge-to-the-hosts-positioning-stack) |
 | Bluetooth | ❌ | Not fixable at this layer: the Waydroid system image ships **no Bluetooth stack at all** (zero packages of 152, no APK, no APEX), and the HCI transport is already exclusively held by `bluebinder` → BlueZ → [analysis](waydroid-gps-bluetooth.md#bluetooth--two-independent-blockers) |
 | Clipboard | ⚠️ | `vendor.waydroid.clipboard@1.0::IWaydroidClipboard` is registered; host↔container copy/paste not exercised |
 | `/dev/video` bind | ⚠️ | LXC logs `Failed to mount "/dev/video" onto ".../dev/video"` and leaves a 0-byte regular file there, because on karatep `/dev/video` is a *directory* of `venus_dec` / `venus_enc` symlinks. Harmless in practice — the OMX components open `/dev/video32` and `/dev/video33` directly, and both work |

@@ -1,10 +1,11 @@
 # GPS and Bluetooth inside Waydroid
 
-Both are missing from the container, and it is tempting to file them together as
-"not bridged yet". They are not the same problem: **GPS is a missing HAL with
-everything else in place, Bluetooth is a missing stack with the hardware already
-spoken for.** Measured on karatep, 2026-08-09, with GPS and Bluetooth both
-enabled in Sailfish settings.
+It is tempting to file these together as "not bridged yet". They are not the
+same problem, and they did not end the same way: **GPS is solved** — the
+container had it all along, but by seizing the host's HAL, and it now goes
+through a bridge so both stacks can hold positioning at once. **Bluetooth is
+not fixable at this layer**: the container ships no Bluetooth stack, and the
+controller is already spoken for. Measured on karatep, 2026-08-09/10.
 
 ## How the host owns the hardware
 
@@ -21,66 +22,97 @@ The container has its own binder domain — `hwpuddlejumper` is mounted as its
 real hwbinder *is* exposed inside as `/dev/host_hwbinder`, but Android's
 framework only ever looks at its own.
 
-## GPS — a missing HAL, nothing else
+## GPS — solved, via a bridge to the host's positioning stack
 
-Everything above the HAL is already present and working in the container:
+**Status: working.** An Android app in the container requests location, gets it
+from Sailfish's own positioning stack, and Sailfish keeps ownership of the GNSS
+HAL throughout.
+
+### What was actually wrong
+
+Not "Waydroid has no location support" — an earlier version of this document
+said that, and it was wrong. Waydroid *does* reach GPS on a Halium device, by
+the worst possible route.
+
+`/system/etc/hosthals.xml` in the container lists `android.hardware.gnss`, and
+Waydroid's patched `libhidlbase` consults that list to redirect HIDL
+`getService()` at the **host's** hwbinder. So an Android app asking for location
+drove the host's `android.hardware.gnss@2.1-service-qti` directly. `IGnss`
+carries a single callback, so that takes the engine away from
+`geoclue-providers-hybris` — which is
+[waydroid#299, "GPS broken on Ubuntu Touch after Waydroid was launched"](https://github.com/waydroid/waydroid/issues/299).
+
+This was easy to miss because `lshal --neat -i` inside the container does **not**
+enumerate host-proxied HALs — it listed no GNSS at all. What settles it is which
+values the framework reports: with the redirect active it logged
+`name=qcom;MPSS.JO.2.0.C1-102262`, `yearOfHw=2015`, `capabilities=2083`, i.e. the
+real modem.
+
+### The fix
+
+Three parts, all now in the packaging:
+
+1. **[`waydroid-gnss`](https://github.com/Sailfish-on-karatep/waydroid-gnss)** —
+   a host daemon registering `android.hardware.gnss@1.0::IGnss/default` on the
+   *container's* hwbinder and answering it from **Geoclue** over D-Bus. Because
+   it consumes geoclue rather than binding the HAL, the host keeps sole
+   ownership and both stacks are ordinary clients. `start()` takes a geoclue
+   reference and `stop()` drops it, so the GPS is only powered while Android is
+   actually navigating.
+2. **Launched from `session_manager`** (waydroid patch 0005). Geoclue is a
+   *session* bus service, so unlike `waydroid-sensord` — which runs as root from
+   the container manager because sensorfw is on the system bus — this has to run
+   as the user. The container's hwbinder node comes from waydroid's own config.
+3. **Overlay setup** (waydroid patch 0006): strip `android.hardware.gnss` from
+   `hosthals.xml` so the host redirect stops winning, and declare the HIDL
+   service in a VINTF manifest fragment. The second is not optional — with the
+   redirect gone and no VINTF entry the framework binds *nothing*, and GNSS
+   disappears from logcat entirely.
+
+HIDL 1.0 is deliberate: Android 13 falls back AIDL → 2.1 → 2.0 → 1.1 → 1.0, so
+it is the smallest surface the framework still reaches.
+
+### Verified on hardware
 
 ```
-feature:android.hardware.location
-feature:android.hardware.location.gps
-feature:android.hardware.location.network
-96  location: [android.location.ILocationManager]
+gps provider: ProviderRequest[@+1s0ms, HIGH_ACCURACY, WorkSource{...gpstest}]
+GnssCallbckJni: gnssSetCapabilitesCb: 1u      <- ours, not the modem's 2083
+GnssManager: gnss hal initialized / gnss hal started
+geoclue-hybris running                         <- activated by our AddReference
 ```
 
-and `dumpsys location` shows the `gps`, `fused` and `passive` providers all
-registered, `enabled=true`, `allowed=true`. They sit at `ProviderRequest[OFF]`
-with `mStarted=false` for one reason: **no `android.hardware.gnss@*::IGnss` is
-registered on the container's hwbinder.** `lshal` inside the container lists
-none. Waydroid has no location support of any kind — `grep -rin "gnss\|location\|gps"`
-across upstream's `tools/` and `data/` returns exactly one hit, in an AppStream
-metadata file.
+Fixes themselves still need an outdoor test; indoors geoclue reports
+`GetStatus = 2` (acquiring) with 0 satellites, so there is nothing to forward.
 
-### The design that fits
+### A trap worth recording
 
-Waydroid already has an established pattern for "the host owns the hardware,
-bridge it into the container", and it is `waydroid-sensors`:
+The upper layer for the system overlay is `overlay_rw/system`, and its contents
+mirror the **container root** — so a file destined for `/system/etc/x` lives at
+`overlay_rw/system/system/etc/x`. Writing it at `overlay_rw/system/etc/x`
+instead puts a real directory over Android's `/etc -> /system/etc` symlink. The
+container then starts `init` and `zygote` and never reaches `system_server`:
+56 processes, `zygote64` spinning as `nobody`, `sys.boot_completed` never set,
+empty logcat.
 
-- a **host-side daemon** (`waydroid-sensord`, ~2100 lines) that
-- registers `android.hardware.sensors@1.0::ISensors` / `default` as a gbinder
-  local object on the *container's* hwbinder node, and
-- implements it against **sensorfw** on the host, so Sailfish keeps owning the
-  sensors and the container becomes a second consumer.
+## Prior art
 
-Waydroid launches it itself, handing it the right binder node, and falls back to
-a stub when it is absent:
+Checked after the fact, and it exists — an earlier version of this document
+claimed there was none, on the strength of an IRC search alone.
 
-```python
-# tools/actions/container_manager.py:170
-if which("waydroid-sensord"):
-    tools.helpers.run.user(args, ["waydroid-sensord", "/dev/" + args.HWBINDER_DRIVER],
-                           output="background")
-# tools/helpers/images.py:151
-if which("waydroid-sensord") is None:
-    props.append("waydroid.stub_sensors_hal=1")
-```
+- [waydroid#2208](https://github.com/waydroid/waydroid/issues/2208), open since
+  Jan 2026: implements a GNSS **AIDL** HAL inside waydroid itself, with the same
+  stated motivation — *"prevent Waydroid from taking control of host GNSS HAL"*.
+  Its instructions to remove the `hosthals.xml` entry and add a VINTF manifest
+  are what put us onto both requirements.
+- [sssemil/waydroid_geoclue_bridge](https://github.com/sssemil/waydroid_geoclue_bridge)
+  — Rust, "Heavy WIP", 7 commits. Not usable here: it targets **GeoClue2**,
+  while Sailfish uses the geoclue 0.12 API, and it implements no HAL at all —
+  it writes JSON to a file inside the container that nothing reads.
+- Open and unresolved: [#226](https://github.com/waydroid/waydroid/issues/226),
+  [#275](https://github.com/waydroid/waydroid/issues/275).
 
-A `waydroid-gnss` is the exact analogue: register `IGnss`/`default` on the
-container's hwbinder, and source fixes from **geoclue over D-Bus** rather than
-from the GNSS HAL directly. That matters — going to the HAL directly would make
-the daemon a second `IGnss::setCallback()` client competing with
-`geoclue-hybris`, and Sailfish would lose positioning whenever Waydroid asked
-for it. Consuming geoclue instead means the host keeps sole ownership of the
-HAL and both stacks are ordinary clients, which is the same shape as audio
-(container → host PulseAudio) and sensors (container → host sensorfw).
-
-`IGnss` is a wider interface than `ISensors`, but Android tolerates a minimal
-implementation: `setCallback`, `start`, `stop`, `cleanup`, `setPositionMode`,
-`injectTime`, `injectLocation`, `deleteAidingData`, returning null for the
-optional sub-interfaces (`IGnssMeasurement`, `IGnssBatching`, `IAGnss`,
-`IGnssConfiguration`, …). `GnssLocationProvider` works against that.
-
-**Cost:** a new repo plus a small patch to the waydroid fork to launch it — the
-same two-part shape as `waydroid-sensors`. Not a configuration change.
+The `#sailfishos-porters` archive still has **zero** hits for "waydroid gps",
+"waydroid bluetooth" or "waydroid gnss".
 
 ## Bluetooth — two independent blockers
 
@@ -130,15 +162,9 @@ needed sequencing to stop them fighting at boot
 Waydroid's system image to ship the Bluetooth stack first, and then a way to
 share the controller that does not currently exist. Recommend leaving it.
 
-## No prior art
-
-`bin/ircgrep.sh` returns **zero** hits for "waydroid gps", "waydroid bluetooth"
-and "waydroid gnss" across eleven years of `#sailfishos-porters`. Nobody in that
-channel has discussed either.
-
 ## Recommendation
 
-- **GPS: worth doing**, as a `waydroid-gnss` host daemon sourcing from geoclue,
-  mirroring `waydroid-sensors`. Everything else is already in place, so the HAL
-  is the whole job.
+- **GPS: done.** `waydroid-gnss` sources from geoclue, mirroring
+  `waydroid-sensors`. Both stacks can hold positioning at once because neither
+  owns the HAL.
 - **Bluetooth: not worth doing**, and not fixable at this layer.
