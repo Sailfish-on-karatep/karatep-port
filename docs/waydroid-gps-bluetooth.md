@@ -74,15 +74,35 @@ it is the smallest surface the framework still reaches.
 
 ### Verified on hardware
 
+Real fixes reach Android, indoors:
+
 ```
-gps provider: ProviderRequest[@+1s0ms, HIGH_ACCURACY, WorkSource{...gpstest}]
-GnssCallbckJni: gnssSetCapabilitesCb: 1u      <- ours, not the modem's 2083
-GnssManager: gnss hal initialized / gnss hal started
-geoclue-hybris running                         <- activated by our AddReference
+last location=Location[gps 8.806013,78.129759 hAcc=9.648 alt=-81.0 bear=317.5
+                       {Bundle[{satellites=8, maxCn0=29, meanCn0=22}]}]
+Number of location reports: 278
 ```
 
-Fixes themselves still need an outdoor test; indoors geoclue reports
-`GetStatus = 2` (acquiring) with 0 satellites, so there is nothing to forward.
+matching the host's geoclue exactly (`8.80601 78.1298 ... 9.648`). The altitude
+is not wrong: NMEA reports 13.0 m MSL with -94.0 m geoid separation, and Android
+wants height above the WGS84 ellipsoid, so 13.0 + (-94.0) = -81.0.
+
+An early check that suggested "no fix, needs sky view" was simply taken while the
+engine was still acquiring — `GetStatus = 2` a minute in means nothing.
+
+### Satellites
+
+`gnssSvStatusCb` is bridged too, so the container gets a real sky view rather
+than `satellites=0, maxCn0=0` — which is also what made an app report that SBAS
+was unavailable.
+
+Geoclue folds the constellation into the PRN with the usual NMEA offsets
+(GLONASS +64, BeiDou +200, Galileo +300, SBAS -87), the inverse of what
+`binderlocationbackend_hidl.cpp` does on the way in, so inverting it recovers
+both the constellation and the in-constellation svid. Without that every
+satellite arrives claiming to be GPS.
+
+`GnssSvStatus` is a fixed 1540-byte struct copied straight into the parcel, so
+its layout is pinned with `G_STATIC_ASSERT` rather than trusted.
 
 ### A trap worth recording
 
