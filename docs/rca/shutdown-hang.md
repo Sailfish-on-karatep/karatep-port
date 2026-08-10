@@ -142,9 +142,21 @@ process is wedged in `D`, and no signal will move it.
 
 It does not obviously explain the *modem* halt timeouts above, so these may well be
 two separate faults, and this one is intermittent while the reboot hang is described
-as always happening. Worth deciding by testing a graceful `reboot` on a boot where the
-deadlock did **not** fire — check with `cat /sys/module/msm_thermal/parameters/enabled`,
-which hangs on an affected boot and returns `N` immediately on a healthy one.
+as always happening.
+
+**The deadlock is now fixed** (kernel `07b2c9ff34ff`, merged as `ce665cd37eae`), and
+`droid-hal-init` was confirmed sitting in `S` rather than `D` across five reboots on
+the patched kernel. So the experiment that decides this is now available and cheap:
+
+> On the patched kernel, try a **graceful `reboot`** (not `reboot -f`) and see whether
+> it still hangs.
+
+Deliberately not run yet: if it does hang, recovery needs a physical power-button
+hold, so it wants someone at the device rather than a remote session.
+
+If it reboots cleanly, this was the cause and the "always use `reboot -f`" workaround
+in CLAUDE.md can go. If it still hangs, the modem hypothesis above stands unchallenged
+and this was a red herring.
 
 → [msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md)
 

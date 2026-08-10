@@ -1,8 +1,9 @@
 # FM radio: enabling the iris tuner
 
-**Status: done — tuner verified end to end on a fresh boot. Audio and reception
-still need a headset. Intermittently blocked by an unrelated kernel deadlock, tracked
-separately in [msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md).**
+**Status: done — tuner verified end to end on a fresh boot, on the patched kernel.
+Audio and reception still need a headset.** An unrelated kernel deadlock used to block
+this intermittently; it is fixed and tracked separately in
+[msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md).
 
 > **Correction.** The first version of this document concluded that "WCNSS never opens
 > the `APPS_FM` SMD channel on a fresh boot". That was wrong. The write never reached
@@ -107,11 +108,11 @@ The band and frequency readbacks come from WCNSS over HCI, not from driver state
 the FM core really is responding. The same sequence had also succeeded earlier on a
 boot that had been up ~37 h.
 
-## The intermittent blocker (not an FM bug)
+## The intermittent blocker (not an FM bug) — since fixed
 
-On *some* boots the very first step above hangs: the write to `fmsmd_set` never
-returns and the task sits unkillable in `D` state. This is **not** an FM fault and
-nothing in the FM stack can fix it.
+On *some* boots the very first step above used to hang: the write to `fmsmd_set` never
+returned and the task sat unkillable in `D` state. This was **not** an FM fault and
+nothing in the FM stack could have fixed it.
 
 `kernel/params.c` guards all module parameters with a single global mutex, and
 `msm_thermal`'s `enabled` parameter has a `->set()` that can deadlock while holding
@@ -122,11 +123,12 @@ module-parameter read and write on the system blocks forever, FM's among them.
 Full analysis, including how to tell the lock holder from the waiters by the
 `param_attr_store` offset: [msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md).
 
-Practical consequence for FM: on a boot where that deadlock fired, FM cannot work and
-neither can MTP or the rest of `init.qcom.post_boot.sh`. Check it with
+Fixed in the kernel by `07b2c9ff34ff` (merged to `hybris-18.1` as `ce665cd37eae`), and
+FM verified working on the patched kernel. On any older kernel the symptom is still
+worth recognising — a boot is affected if this hangs instead of printing `N`:
 
 ```sh
-cat /sys/module/msm_thermal/parameters/enabled   # hangs => the boot is affected
+cat /sys/module/msm_thermal/parameters/enabled
 ```
 
 ### What this corrects

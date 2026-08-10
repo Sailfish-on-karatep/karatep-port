@@ -1,6 +1,8 @@
 # msm_thermal deadlocks the global module-parameter lock on some boots
 
-**Status: root-caused, not yet fixed. Needs a kernel patch.**
+**Status: fixed.** Kernel patch `07b2c9ff34ff`, merged to `hybris-18.1` as
+`ce665cd37eae`. Verified across five consecutive reboots: the trigger fires on every
+one and none deadlocks.
 
 ## Symptom
 
@@ -136,34 +138,76 @@ port includes:
   shutdown investigation points at the modem failing to halt, and these may be two
   separate faults. Worth re-testing a graceful reboot on a boot where this deadlock
   did *not* fire.
-- `systemctl is-system-running` stays `starting` indefinitely.
 
-## Proposed fix
+All of the above are resolved by the fix, confirmed on the patched kernel — see
+Verification.
 
-A kernel patch, via the usual fork-and-repin route on
-`Sailfish-on-karatep/android_kernel_lenovo_msm8937`. Completing the completion on the
-error path is **not** sufficient on its own — the thread could consume it, loop, and
-be asleep again before `kthread_stop()` sets the stop flag. The wait itself has to
-become stop-aware, e.g.:
+An earlier draft also blamed `systemctl is-system-running` staying at `starting`.
+**That was wrong** — it still reports `starting` with the deadlock fixed. The unit
+actually holding boot open is `init-done.service`, which is unrelated and pre-existing.
+
+## The fix
+
+Kernel patch `07b2c9ff34ff` on `Sailfish-on-karatep/android_kernel_lenovo_msm8937`
+(no fork needed — the kernel repo is already ours and pinned in
+`local_manifests/karatep.xml`), merged to `hybris-18.1` as `ce665cd37eae`.
+
+Completing the completion on the error path is **not** sufficient on its own: the
+thread could consume it, run the loop body, and be asleep again before
+`kthread_stop()` sets the stop flag. The wake has to be ordered so the thread cannot
+miss it, so a flag is set *before* the `complete()`:
 
 ```c
-	while (!kthread_should_stop()) {
-		while (wait_for_completion_interruptible_timeout(
-			&hotplug_notify_complete, HZ) <= 0) {
-			if (kthread_should_stop())
-				return 0;
-		}
-		reinit_completion(&hotplug_notify_complete);
-		if (kthread_should_stop())
-			return 0;
+	if (hotplug_init_cpu_offlined()) {
+		hotplug_task_stop = true;
+		complete(&hotplug_notify_complete);
+		kthread_stop(hotplug_task);
+		hotplug_task = NULL;
+	}
 ```
 
-`do_freq_mitigation()` and `do_thermal_monitor()` in the same driver use the identical
-`wait_for_completion_interruptible()` pattern and should be checked for the same
-hazard while we are in there.
+and `do_hotplug()` breaks on that flag immediately after its wait returns. Setting the
+flag first means the thread cannot miss it whether it is still waiting, already in the
+loop body, or exited early on `!core_control_enabled`.
 
-Fixing the TSENS sensor id resolution (`sensor_id == -19`) would remove the trigger,
-but not the bug: any other failure of `therm_get_temp()` re-arms it.
+`hotplug_task` is cleared afterwards because every other user of it is an
+`if (hotplug_task)` guard whose work is pointless once the thread is stopped — and
+none of the twenty use sites dereferences it, so `NULL` is safe.
+
+A timeout-based wait (`wait_for_completion_interruptible_timeout`) was considered and
+rejected: it would wake an RT thread on a fixed period forever to fix a one-shot
+init-time race.
+
+`do_freq_mitigation()` and `do_thermal_monitor()` wait the same way, but `hotplug_task`
+is the **only** thread this driver ever passes to `kthread_stop()` — there is exactly
+one `kthread_stop` call in the file — so they are not exposed to this. (An earlier
+draft of this document said they should be fixed too; that was wrong.)
+
+Fixing the TSENS sensor id resolution (`sensor_id == -19`, i.e. `sensor_get_id()`
+failing to resolve `cpus[cpu].sensor_type`) would remove the trigger but not the bug:
+any other failure of `therm_get_temp()` re-arms it. Still worth doing separately.
+
+## Verification
+
+Flashed `3.18.124-perf-g07b2c9ff34ff` and rebooted five times. Every boot:
+
+| check | result |
+|---|---|
+| `Unable to read TSENS sensor:-19` in dmesg | present — **the trigger still fires** |
+| `cat /sys/module/msm_thermal/parameters/enabled` | returns `N` immediately |
+| tasks wedged in `param_attr_store` | 0 |
+| `init.qcom.post_boot.sh` | runs to completion |
+| `droid-hal-init` | `S`, not `D` |
+| `msm_thermal:hotplug` thread | gone — stopped cleanly, only the freq and monitor threads remain |
+| FM radio, as `defaultuser` | tunes 91.1 / 98.3 / 104.0 MHz, `EXIT=0` |
+
+The trigger firing on all five is what makes this meaningful: the failure path is
+still being taken, and it no longer deadlocks. Before the patch the same path left
+`thermal-engine` in `D` and the hotplug thread parked in `S` forever.
+
+Note the device runs the branch commit `-g07b2c9ff34ff` while `hybris-18.1` now
+carries the merge `ce665cd37eae`. The source is identical; only the version string a
+rebuild would stamp differs.
 
 ## Not the cause
 
