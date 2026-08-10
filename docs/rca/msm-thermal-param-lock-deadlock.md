@@ -209,6 +209,26 @@ Note the device runs the branch commit `-g07b2c9ff34ff` while `hybris-18.1` now
 carries the merge `ce665cd37eae`. The source is identical; only the version string a
 rebuild would stamp differs.
 
+### Rebuild droid-hal, or this patch breaks WLAN
+
+Flashing the patched `hybris-boot.img` on its own **took WLAN down**:
+`wlan-module-load.service` failed, no `wlan` module, no `wlan0`. This is the hazard
+already noted in CLAUDE.md — `wlan.ko` must match the running kernel exactly, and the
+kernel release string is derived from `git describe`, so *any* kernel commit changes it
+and orphans the old module under `/lib/modules/<old release>/`.
+
+The full sequence for a kernel change on this port is therefore:
+
+```sh
+/opencloud/bin/habuild /parentroot/parentroot/opencloud/bin/build-hal.sh   # kernel + boot image
+rpm/dhd/helpers/build_packages.sh -d                                      # droid-hal, rebuilds wlan.ko
+# flash hybris-boot.img AND install the new droid-hal-karatep* packages
+```
+
+After doing both, `wlan.ko` lands under `/lib/modules/3.18.124-perf-g07b2c9ff34ff/`
+and WLAN comes back: module loaded, service active, `wlan0` present. Bluetooth was
+unaffected throughout (`bluebinder` bridges through vhci, not a kernel module).
+
 ## Not the cause
 
 For the record, since the FM investigation initially blamed these:
