@@ -1,8 +1,9 @@
 # msm_thermal deadlocks the global module-parameter lock on some boots
 
-**Status: fixed.** Kernel patch `07b2c9ff34ff`, merged to `hybris-18.1` as
-`ce665cd37eae`. Verified across five consecutive reboots: the trigger fires on every
-one and none deadlocks.
+**Status: fixed, twice over.** `07b2c9ff34ff` (merged as `ce665cd37eae`) makes the
+deadlock impossible; `3a06ccbcfede` (merged as `b6da8267f4ed`) removes the TSENS
+failure that armed it, so the trigger no longer occurs at all. Verified across eight
+reboots between them.
 
 ## Symptom
 
@@ -183,9 +184,59 @@ is the **only** thread this driver ever passes to `kthread_stop()` — there is 
 one `kthread_stop` call in the file — so they are not exposed to this. (An earlier
 draft of this document said they should be fixed too; that was wrong.)
 
-Fixing the TSENS sensor id resolution (`sensor_id == -19`, i.e. `sensor_get_id()`
-failing to resolve `cpus[cpu].sensor_type`) would remove the trigger but not the bug:
-any other failure of `therm_get_temp()` re-arms it. Still worth doing separately.
+### The trigger, fixed separately
+
+`sensor_id == -19` turned out to be a second, independent bug — an inherited
+regression, and a textbook one. `fetch_cpu_mitigaiton_info()` allocates the per-CPU
+sensor name correctly and then copies into it with the wrong bound:
+
+```c
+	cpus[_cpu].sensor_type = devm_kzalloc(&pdev->dev,
+				strlen(sensor_name) + 1, GFP_KERNEL);
+	...
+	strscpy((char *)cpus[_cpu].sensor_type, sensor_name,
+		sizeof(cpus[_cpu].sensor_type));
+```
+
+`sensor_type` is a `const char *`, so `sizeof()` is **8** on arm64 — the size of the
+pointer, not of the buffer. Every per-CPU sensor name is truncated to seven characters
+plus the NUL.
+
+`git log -L` pins the provenance exactly. Commit `0498e1415d62`, *"msm: thermal: Fix
+strlcpy usage in fetch_cpu_mitigaiton_info"*, replaced a correct `strlcpy(...,
+strlen(sensor_name) + 1)` with the `sizeof()` form. The hardening sweep introduced the
+bug it claimed to fix. (Same species as the TS3A227E `-Wmisleading-indentation`
+regression already documented in this port.)
+
+karatep's names come from `msm8937.dtsi` as `tsens_tz_sensor0..7`, so all eight CPUs
+ended up asking for `tsens_t`, which matches no registered thermal zone. Straight from
+the driver's own debugfs on the running device, before:
+
+```
+tsens sensor:tsens_tz_sensor5      <- a different field, stored in full
+cpu0 sensor:tsens_t
+cpu1 sensor:tsens_t
+...
+```
+
+and after `3a06ccbcfede`:
+
+```
+cpu0 sensor:tsens_tz_sensor5
+cpu1 sensor:tsens_tz_sensor6
+cpu2 sensor:tsens_tz_sensor7
+cpu3 sensor:tsens_tz_sensor8
+cpu4..7 sensor:tsens_tz_sensor9
+```
+
+`Unable to read TSENS` is now absent from dmesg entirely (it appeared on every boot
+before), and the CPU thermal zones report real temperatures for the first time —
+48/48/48/47/49 °C — with no spurious core offlining, 8 of 8 CPUs online and
+`cpus_offlined` 0. So CPU thermal mitigation had never had a working sensor to read on
+this device.
+
+Both fixes are worth keeping: this one removes the failure, the other makes it
+survivable if any other `therm_get_temp()` call ever fails.
 
 ## Verification
 
