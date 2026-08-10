@@ -362,10 +362,19 @@ silence, and none of which logs an error.
 ### Everything silent: `module-policy-enforcement` never loaded
 
 `droid-config`'s `sparse/etc/pulse/xpolicy.conf.d/fmradio.conf` was a 21-byte file whose entire
-content was the literal text `fmradio.conf.disabled` — a botched attempt to disable the snippet,
-added as an unrelated drive-by in `2125abf` ("Bluetooth", Sep 2024). The real snippet already
-ships beside it as `fmradio.conf.disabled`, which is how upstream ships it switched off, so
-nothing was ever meant to be at that path.
+content was the literal text `fmradio.conf.disabled`, added as an unrelated drive-by in `2125abf`
+("Bluetooth", Sep 2024).
+
+> **Correction (Aug 2026).** This was originally written up as "a botched attempt to *disable* the
+> snippet", on the reasoning that the real snippet already ships beside it as
+> `fmradio.conf.disabled` and so nothing was meant to be at that path. That reading was wrong, and
+> it had the sign backwards: `fmradio.conf` → `fmradio.conf.disabled` is exactly how fp2-sibon and
+> mido ship the snippet **enabled**, and it is what hadk-faq's FM section tells you to add. git
+> records the old blob (`3f2536f8`) as byte-identical to the symlink now restored in the FM work —
+> same content, mode `100644` where it should have been `120000`. So it was a botched *enable*: the
+> symlink was flattened into a regular file on copy. The diagnosis of the resulting breakage below
+> is unaffected, and the snippet is now committed `120000` so it cannot flatten again. See
+> [fm-radio-smd-never-opens.md](rca/fm-radio-smd-never-opens.md).
 
 `module-policy-enforcement` parses `/etc/pulse/xpolicy.conf.d/*.conf` at init. That stray line is
 not valid syntax, `pa__init()` failed, and the module never loaded. There is no error anywhere:
