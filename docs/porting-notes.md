@@ -374,7 +374,7 @@ content was the literal text `fmradio.conf.disabled`, added as an unrelated driv
 > same content, mode `100644` where it should have been `120000`. So it was a botched *enable*: the
 > symlink was flattened into a regular file on copy. The diagnosis of the resulting breakage below
 > is unaffected, and the snippet is now committed `120000` so it cannot flatten again. See
-> [fm-radio-smd-never-opens.md](rca/fm-radio-smd-never-opens.md).
+> [fm-radio-enablement.md](rca/fm-radio-enablement.md).
 
 `module-policy-enforcement` parses `/etc/pulse/xpolicy.conf.d/*.conf` at init. That stray line is
 not valid syntax, `pa__init()` failed, and the module never loaded. There is no error anywhere:

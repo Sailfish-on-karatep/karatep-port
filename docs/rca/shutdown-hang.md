@@ -126,6 +126,28 @@ Optional, only *after* a good trace is captured: arm systemd's shutdown watchdog
 a wedged shutdown reboots itself instead of needing a hard reset. It is a mitigation
 and it masks the symptom, so it must not be enabled while still diagnosing.
 
+## New lead (Aug 2026): droid-hal-init can be stuck in `D` before shutdown even starts
+
+Found while investigating FM radio, and untested against this bug so far.
+
+On some boots `msm_thermal` deadlocks the kernel's single global module-parameter
+mutex, after which every `/sys/module/*/parameters/*` access blocks forever in
+uninterruptible sleep. `droid-hal-init` is one of the tasks that hits it — it writes
+`/sys/module/g_android/parameters/mtp_rx_req_len` — and was observed sitting
+unkillable in `D` state for the rest of the boot.
+
+That is a direct candidate explanation for "a graceful `reboot` always hangs —
+`droid-hal-init.service` never stops": systemd cannot stop a service whose main
+process is wedged in `D`, and no signal will move it.
+
+It does not obviously explain the *modem* halt timeouts above, so these may well be
+two separate faults, and this one is intermittent while the reboot hang is described
+as always happening. Worth deciding by testing a graceful `reboot` on a boot where the
+deadlock did **not** fire — check with `cat /sys/module/msm_thermal/parameters/enabled`,
+which hangs on an affected boot and returns `N` immediately on a healthy one.
+
+→ [msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md)
+
 ## Other findings noted along the way
 
 Three units are failed at runtime (`systemctl --failed`); relevance unknown:

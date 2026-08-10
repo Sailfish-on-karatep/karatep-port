@@ -1,19 +1,27 @@
-# FM radio: WCNSS never opens the APPS_FM SMD channel on a fresh boot
+# FM radio: enabling the iris tuner
 
-**Status: in progress — the Sailfish side is fixed and verified, one device-level
-blocker remains and is not root-caused.**
+**Status: done — tuner verified end to end on a fresh boot. Audio and reception
+still need a headset. Intermittently blocked by an unrelated kernel deadlock, tracked
+separately in [msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md).**
+
+> **Correction.** The first version of this document concluded that "WCNSS never opens
+> the `APPS_FM` SMD channel on a fresh boot". That was wrong. The write never reached
+> the FM transport at all: it was stuck on the kernel's global module-parameter mutex,
+> held by an unrelated `msm_thermal` deadlock. `APPS_FM` stayed `CLOSED` simply because
+> nothing ever asked it to open. With that deadlock absent, FM works on a fresh boot.
+> The section below has been rewritten; the mistaken reasoning is called out at the end.
 
 ## Summary
 
 FM radio was never "unimplemented" here. The kernel driver, both userspace packages
 and the whole audio policy chain were already present; what was missing was
-permission to open the transport, which `droid-config` now grants. With that fixed
-the full tune path was proven working on hardware.
+permission to open the transport, which `droid-config` now grants.
 
-But on a **fresh boot** the transport cannot be opened at all: the `APPS_FM` SMD
-channel to WCNSS stays `CLOSED`, and the thread that writes the enable switch wedges
-in uninterruptible sleep. The same write succeeded instantly on a long-running boot,
-so the capability is real and something about early boot state prevents it.
+With that fixed the tuner works, verified as `defaultuser` on a fresh boot. What made
+this take a while to establish is that on *some* boots every module-parameter write on
+the system is deadlocked by `msm_thermal` before FM is ever reached, which made the fix
+look like it had not worked. That is a separate, system-wide kernel bug with its own
+write-up.
 
 ## How FM is wired on this device
 
@@ -77,70 +85,65 @@ sole exception is this one, precisely because `init.qcom.rc` chowns it. That mak
 file in question. Verified across reboots: the parameter now comes up `system:audio
 0660` and `/dev/radio0` `audio:audio 0660`.
 
-## Proof the hardware works
+## Proof it works
 
-On a boot that had been up ~37 h, as `defaultuser`, with only the packaged
-permissions:
-
-| step | result |
-|---|---|
-| write `fmsmd_set=1` | accepted immediately |
-| `VIDIOC_QUERYCAP` | `driver=radio-iris`, `card=QTI FM Radio Transceiver` |
-| set state `FM_RECV` | OK |
-| `VIDIOC_G_TUNER` | band **87.5–108.0 MHz**, read back from the chip over HCI |
-| tune 91.1 / 98.3 / 104.0 MHz | each confirmed by `VIDIOC_G_FREQUENCY` readback |
-
-The band and frequency readbacks come from WCNSS, not from driver state, so the FM
-core really was responding.
-
-## The open blocker
-
-On every **fresh boot** since, the same write wedges:
+Verified as `defaultuser`, on a **fresh boot**, with only what the packages install
+and no manual intervention:
 
 ```
-$ grep APPS_FM /sys/kernel/debug/smd/ch
-11|APPS_FM            |P|APPS |CLOSED |0x02000|0x00000|0x00000|dcciwrsb|0x00000
+uptime: 53.99
+param_lock free? enabled=N
+running as uid=100000
+OK  wrote fmsmd_set=1  (exactly what the Media app's plugin does)
+OK  FM receiver on
+OK  tuned 91.1  -> chip reports 91.10 MHz  (band 87.5-108.0)
+OK  tuned 98.3  -> chip reports 98.30 MHz  (band 87.5-108.0)
+OK  tuned 104.0 -> chip reports 104.00 MHz (band 87.5-108.0)
+OK  FM off, transport released
+EXIT=0
 ```
 
-The writing task sits in `D` state with `wchan = param_attr_store`, so `SIGALRM`
-cannot even be delivered — it is stuck inside the kernel, in
-`radio_hci_smd_register_dev()`'s `smd_named_open_on_edge("APPS_FM", SMD_APPS_WCNSS, …)`.
-Watched for 60 s: the channel never leaves `CLOSED` and the writer never returns.
-`radio-iris` logs nothing at all, because it never gets that far.
+The band and frequency readbacks come from WCNSS over HCI, not from driver state, so
+the FM core really is responding. The same sequence had also succeeded earlier on a
+boot that had been up ~37 h.
 
-Note the channel **exists** (id 11) — this is not a missing channel returning
-`-ENODEV`. The APPS side is waiting for WCNSS to open its end, and WCNSS never does.
+## The intermittent blocker (not an FM bug)
 
-Once a write has wedged it holds the driver's `fm_smd_enable` mutex, so every later
-attempt blocks too. Only a reboot clears it.
+On *some* boots the very first step above hangs: the write to `fmsmd_set` never
+returns and the task sits unkillable in `D` state. This is **not** an FM fault and
+nothing in the FM stack can fix it.
 
-### Ruled out
+`kernel/params.c` guards all module parameters with a single global mutex, and
+`msm_thermal`'s `enabled` parameter has a `->set()` that can deadlock while holding
+it — `kthread_stop()` on a thread that sleeps in `wait_for_completion_interruptible()`
+and therefore never observes `kthread_should_stop()`. Once that happens, every
+module-parameter read and write on the system blocks forever, FM's among them.
 
-- **WCNSS not up** — `wcnss = ONLINE` in `/sys/bus/msm_subsys/devices/*/state`, and
-  `wcnss: IRIS Reg: 91100004` appears at boot.
-- **Bluetooth not powered** — `hci0` is registered, rfkill unblocked, `bluebinder`
-  active and reporting "Successfully initialized vhci bluetooth". Worth noting that
-  `bluebinder` bridges BT through **vhci/binder**, not the kernel SMD path, so BT
-  never exercises the WCNSS SMD stack at all — which is also why mido's habit of
-  hanging `droid-fm-up.service` off `bluetooth.service` buys nothing here.
-- **Waydroid interference** — `waydroid-container` was active in both the working and
-  the failing case.
-- **Permissions** — the write reaches the driver and blocks inside it; `EACCES` is
-  long gone.
+Full analysis, including how to tell the lock holder from the waiters by the
+`param_attr_store` offset: [msm-thermal-param-lock-deadlock.md](msm-thermal-param-lock-deadlock.md).
 
-### Not yet explained
+Practical consequence for FM: on a boot where that deadlock fired, FM cannot work and
+neither can MTP or the rest of `init.qcom.post_boot.sh`. Check it with
 
-Why the identical write succeeded immediately on a ~37 h uptime boot and wedges on a
-fresh one. The obvious suspects (WCNSS state, BT power, Waydroid) are all ruled out
-above, so the differentiator is still unknown — possibly a WCNSS subsystem restart
-having occurred, or some FM-core power-up that Android's `libfm-hci` performs and
-which nothing on Sailfish does. There is **no vendor FM HAL service binary** on this
-device (only `vendor.qti.hardware.fm@1.0.so`, an interface library), so FM on
-LineageOS 18.1 here is driven by the system-side FMRadio app, not a vendor service we
-could start.
+```sh
+cat /sys/module/msm_thermal/parameters/enabled   # hangs => the boot is affected
+```
 
-`APPS_FM` returns **zero hits** across eleven years of `#sailfishos-porters` logs, so
-there is no prior art for this symptom at all.
+### What this corrects
+
+The first pass at this investigation concluded WCNSS was never opening the `APPS_FM`
+SMD channel, on the strength of the channel showing `CLOSED` in
+`/sys/kernel/debug/smd/ch` while the writer was wedged. That reasoning was backwards:
+the channel was `CLOSED` because nothing ever reached the transport to open it. Two
+things should have given it away sooner —
+
+- `radio-iris` logged **nothing at all**, not even an error, which is impossible if
+  the driver's `->set()` had actually been entered;
+- `smd_named_open_on_edge()` cannot block indefinitely in the first place — its worst
+  case is a single `msleep(250)` before it returns 0.
+
+WCNSS, Bluetooth and Waydroid were all correctly ruled out as differentiators; the
+mistake was assuming the remaining suspect had to be inside the FM path at all.
 
 ## Still untested: audio and reception
 
