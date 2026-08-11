@@ -26,7 +26,7 @@ The same shape was reported on `#sailfishos-porters` and never answered:
 Worth stating, because the driver looks broken from the app and is not:
 
 - **The tuner works.** Driving `/dev/radio0` directly as `defaultuser` — the app's own
-  identity — powers FM on, tunes 100.10 MHz and reads back `signal=142`, stereo.
+  identity — powers FM on, tunes 100.10 MHz and reads the station back.
 - **Permissions are correct.** `/dev/radio0` is `audio:audio 0660`, `fmsmd_set` is
   `system:audio 0660`, `defaultuser` is in `audio`.
 - **There is no race against the SMD open.** The plugin waits 20 ms after writing
