@@ -1773,11 +1773,9 @@ done | sort -u
   used to be on this list; it succeeds since it became `Type=oneshot` — see
   [Bluetooth](#the-fix-two-changes-that-only-work-together). `systemd-tmpfiles-setup.service`
   was also on this list and no longer fails.
-* Mobile data does not work — **root-caused** against a live SIM. Sailfish disables Android's
-  `netd`, but this vendor's `netmgrd` is a client of the Netd *HAL* and parks forever waiting
-  for `android.system.net.netd@1.1::INetd`, so `dsi_netctrl` never hands `rild` a handle and
-  every data call dies at `unable to get dsi hndl`. Fix is `external/stub_netd` →
-  [investigation](rca/mobile-data-no-dsi-handle.md).
+* `droid-hal-karatep` still needs a rebuild (`build_packages.sh -d`) to pick up the stub Netd
+  HAL binary out of `out/target/product/karatep/system/bin/hw/`. It is verified working, but
+  hand-installed on the test device — an image built today would not carry it.
 * `org.ofono.NetworkMonitor.GetServingCellInformation` reports **RSRP and RSRQ in each other's
   fields**. Proven over 311 samples: the value under `ReferenceSignalReceivedQuality` spans
   85–101 (valid RIL RSRP 44–140, impossible for RSRQ 3–20) and correlates −0.73 with raw

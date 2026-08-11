@@ -3,7 +3,7 @@
 Device: **lenovo/karatep** — Lenovo Vibe K6 Note / Plus, **MSM8937 / Snapdragon 430**, Adreno 505.
 Base: LineageOS 18.1 (Android 11) / `hybris-18.1`, aarch64, Sailfish OS 5.1.0.11.
 
-Status: **root-caused, fix implemented, hardware verification pending.**
+Status: **fixed, verified on hardware.**
 Fix is `external/stub_netd` (`Sailfish-on-karatep/stub_netd`, branch `hybris-18.1`) plus the
 `netd-stub.rc` shipped by `droid-config-karatep`.
 
@@ -190,14 +190,63 @@ is documented only indirectly:
 
 ## Verification
 
-Pending. To verify:
+Verified on hardware, 2026-08-11, on the live BSNL SIM.
 
-```sh
-# after installing the rebuilt droid-hal + droid-config
-systemctl status droid-hal-init
-/system/bin/lshal | grep INetd                     # the stub must be registered
-/system/bin/logcat -b main -d | grep QC-NETMGR     # netmgrd must get past "Looking for Netd"
-dbus-send --system --print-reply --dest=org.ofono /ril_0/context1 \
-    org.ofono.ConnectionContext.SetProperty string:Active variant:boolean:true
-ip -4 addr | grep rmnet_data                       # an interface must come up
+droid-hal-init picks the service up and starts it:
+
 ```
+droid-hal-init: Parsing file /usr/libexec/droid-hybris/system/etc/init/netd-stub.rc...
+droid-hal-init: starting service 'netd-hal-1-1-stub'...
+```
+
+`lshal` shows it registered, with `netmgrd` (pid 1791) among its clients:
+
+```
+FM    Y android.system.net.netd@1.0::INetd/default   1610   1791 1215
+DC,FM Y android.system.net.netd@1.1::INetd/default   1610   1791 1215
+```
+
+`netmgrd` now walks the whole path it previously could not start:
+
+```
+QC-NETMGR-LIB: getServiceImpl(): INetd discovered
+QC-NETMGR-LIB: registerLinkToDeath(): Success registerLinkToDeath!
+QC-NETMGR-LIB: NetmgrNetdClientInit(): Created netd client
+QC-NETMGR-LIB: registerNetwork(): createOemNetwork succeeded [packet mark : 0x0] [net id : 0] [network handle : 0x1]
+```
+
+`unable to get dsi hndl` no longer appears anywhere in the logs, and ofono gets to
+`setting up data call`. The context activates with a real carrier address:
+
+```
+Active   = true
+Settings = Interface rmnet_data0, Method static,
+           Address 100.103.37.103, Netmask 255.255.255.240
+```
+
+connman brings it to `State = online` (gateway `100.103.37.104`, nameservers `61.1.1.1`,
+`1.1.1.1`), and traffic flows:
+
+```
+ping -c 3 -I rmnet_data0 8.8.8.8
+  3 packets transmitted, 3 packets received, 0% packet loss
+  round-trip min/avg/max = 68.718/71.182/74.977 ms
+
+curl --interface rmnet_data0 http://deb.debian.org/
+  http_code=200 time=0.668561s dl=1876B
+```
+
+### Two things that are not bugs
+
+* **Cellular data only comes up while WiFi is off.** connman keeps a single default route and
+  prefers WiFi, so with WiFi associated it clears the context (`Clearing active context` in
+  the ofono journal) moments after activation. That is ordinary connman policy, not a
+  regression — the first test after the fix looked like a failure purely for this reason.
+* The address is in `100.64.0.0/10`, which is carrier-grade NAT. Normal for this operator.
+
+### Still to do
+
+The verified fix was **hand-installed** onto the device for this test. To make it survive an
+image build, `build_packages.sh -d` must be re-run so `droid-hal-karatep` picks the binary up
+out of `out/target/product/karatep/system/bin/hw/`; `droid-config-karatep` already ships
+`netd-stub.rc`.
