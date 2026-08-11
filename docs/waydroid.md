@@ -47,6 +47,12 @@ Measured on the device, 2026-08-09, container up 17 h.
 | Per-app network accounting / data saver | ❌ | **Structurally impossible here.** Android 13's `netd` does this with eBPF; kernel 3.18 has no `BPF_PROG_TYPE_CGROUP_SKB`, so every call returns `Function not implemented (code 38)`. Constant `NetworkStats` / `NetworkPolicy` / `TrafficController` log spam is this and only this. Traffic itself is unaffected |
 | GPS | ✅ | Works, via [`waydroid-gnss`](https://github.com/Sailfish-on-karatep/waydroid-gnss) bridging the container's `IGnss` to the host's Geoclue, so Sailfish keeps the HAL and both stacks can position at once. The container previously reached GPS by *seizing* the host HAL through `hosthals.xml` → [design](waydroid-gps-bluetooth.md#gps--solved-via-a-bridge-to-the-hosts-positioning-stack) |
 | Bluetooth | ❌ | Not fixable at this layer: the Waydroid system image ships **no Bluetooth stack at all** (zero packages of 152, no APK, no APEX), and the HCI transport is already exclusively held by `bluebinder` → BlueZ → [analysis](waydroid-gps-bluetooth.md#bluetooth--two-independent-blockers) |
+| Battery / charging | ✅ | Real values, matching the host node for node — 100 %, 4398 mV, 35.5 °C, USB not AC. Waydroid's health HAL used to overwrite the sysfs reading with a hardcoded 85 %-and-charging mock → [rca](rca/waydroid-battery-mocked.md) |
+| Thermal | ❌ | `dumpsys thermalservice` says `HAL Ready: false` with no cached temperatures, so Android cannot throttle or warn. `android.hardware.thermal` is in `hosthals.xml`, but the host publishes no such HIDL service — it runs the vendor's `thermal-engine` daemon instead. Fixable the way GPS was (a host daemon on the container's hwbinder), not yet done |
+| Time zone | ✅ | Taken from the host at container start — `/etc/localtime` → `cmd alarm set-timezone`. Android used to sit on GMT for ever, so every clock and timestamp was out by the host's offset (patch 0007) |
+| Shared media folders | ✅ | `~/Pictures`, `~/Videos`, `~/Music`, `~/Downloads` and `~/Documents` are bound into Android's shared storage as Pictures, Movies, Music, Download and Documents, so both sides see one set of files (patch 0008) |
+| Storage | ⚠️ | Correct but shared: `/data` and `/storage/emulated/0` are the same 24 GB `mmcblk0p54` that holds Sailfish, so an Android app fills the phone's home. Android's headline "device storage" figure comes from `/sys/block/mmcblk0/size`, the whole 29 GiB eMMC, and is rounded up for display — that number is not what is usable |
+| USB debugging / adb | ✅ | `adbd` running, `sys.usb.state=adb`, listening on `tcp6 :5555`. Unrelated to the battery's USB-powered flag: `waydroid shell` is `lxc-attach` and adb is over the container's veth, neither goes near a charger state |
 | Clipboard | ⚠️ | `vendor.waydroid.clipboard@1.0::IWaydroidClipboard` is registered; host↔container copy/paste not exercised |
 | `/dev/video` bind | ⚠️ | LXC logs `Failed to mount "/dev/video" onto ".../dev/video"` and leaves a 0-byte regular file there, because on karatep `/dev/video` is a *directory* of `venus_dec` / `venus_enc` symlinks. Harmless in practice — the OMX components open `/dev/video32` and `/dev/video33` directly, and both work |
 
@@ -183,8 +189,60 @@ specific to karatep or to `hybris-18.1`. Full write-up in
 It takes effect at `waydroid init` / `waydroid upgrade`, **not** at session start, so an existing
 install needs `waydroid upgrade -o` once after the package is installed.
 
-Both carry upstream as a **git submodule**, and both do their patching with
+### Patch 0007 — take Android's time zone from the host
+
+Android starts on GMT and is never told otherwise, so every clock, alarm, calendar entry and log
+timestamp inside the container was wrong by the host's offset. It cannot be fixed with a property
+in `waydroid.prop`: `persist.sys.timezone` is a *persistent* property, so Android keeps it in the
+container's `/data` and init restores it over anything the vendor prop file says. AlarmManager is
+the supported way in — `cmd alarm set-timezone` writes the property itself *and* broadcasts
+`ACTION_TIMEZONE_CHANGED`, so processes that already cached the zone pick the new one up without
+a restart.
+
+That means waiting for the framework, so the work happens on a thread — `do_start()` must not
+block for the length of an Android boot. The zone name comes from `/etc/localtime`'s symlink
+target, falling back to `/etc/timezone`; if neither answers, Android's own setting is left alone.
+
+### Patch 0008 — share the host's media folders
+
+`~/Pictures`, `~/Videos`, `~/Music`, `~/Downloads` and `~/Documents` are bound into the
+container's `/data/media/0` as Pictures, Movies, Music, Download and Documents, as LXC session
+entries — so they exist only while the container does and there is nothing to unmount afterwards.
+Both sides then see one set of files: Android creates them `media_rw:media_rw 0664` and the
+Sailfish user is in the `media_rw` group, and Sailfish's own `0644` files are readable and
+writable from Android. Verified in both directions.
+
+Which directories to share is a property of the host's home layout, not of waydroid — Sailfish
+keeps videos in `Videos` and downloads in `Downloads` where Android says `Movies` and `Download` —
+so the map lives in `waydroid-extra`, the same way patch 0004's property namespaces do, and
+nothing is shared unless a device adaptation ships the file. karatep's is
+`droid-config-karatep/sparse/etc/waydroid-extra/shared-folders.cfg`.
+
+Two things learned on hardware:
+
+- `configparser` lowercases keys, which gave Android a second, empty `movies` beside its own
+  `Movies`. `optionxform = str` keeps the names as written.
+- **Android chowns a folder to `media_rw` as soon as it takes it over.** An ownership check on
+  the host path therefore passes on the first session and refuses the same folder for ever after,
+  so the guard is containment in the session user's home (after `realpath`, so a symlink cannot
+  point out of it). The mode stays `0775` and the user is in the group, so nothing loses access —
+  but `~/Pictures` and friends do change owner, and MediaProvider leaves a `.thumbnails` cache in
+  each.
+
+DCIM is deliberately not shared: Android's camera writes to `DCIM/Camera` and Sailfish's to
+`Pictures/Camera`, so mapping it onto `Pictures` would mount one directory in two places and have
+MediaProvider index every photo twice.
+
+Both packaging repos carry upstream as a **git submodule**, and both do their patching with
 `%autosetup -p1 -n %{name}-%{version}/upstream`.
+
+Patches are applied **in series**, so each one must apply to the tree the previous ones produced.
+0008 originally added an `import` three lines from 0007's and broke the whole series with
+`error: patch failed: tools/helpers/lxc.py:10`. Check a new patch with:
+
+```sh
+cd hybris/mw/waydroid/upstream && git checkout -- . && for p in ../rpm/0*.patch; do git apply "$p"; done
+```
 
 ### mb2 never runs `%prep` — patches are silently skipped
 
