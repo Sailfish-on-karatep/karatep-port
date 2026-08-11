@@ -142,19 +142,37 @@ defconfig, or on reading the consuming daemon's source — not on inspection of 
 | 24 | Act dead mode | ❓ `jolla-actdead-charging` installed and `actdead.target` exists, but act-dead has never been entered |
 | 25 | Extra filesystems | ⚠️ F2FS, VFAT, FUSE and OVERLAY are in. **BTRFS, UDF, NFS, CIFS, exFAT/NTFS, ISO9660 and SQUASHFS are not.** BTRFS is separately why factory reset cannot work → [rca](rca/factory-reset-does-nothing.md) |
 
-Items 1, 2 and 17 are fixed in `droid-config-karatep` but **have not yet been exercised on
-hardware** — installing into `/etc` needs root, and no root password is set on this device. They
-are verified against the parsers that consume them (`tsg_objects_read_config()`,
-`gconf_client_load_values()`, csd's QSettings keys), not merely against expectation. To confirm
-after the next image build:
+Items 1, 2 and 17 are fixed in `droid-config-karatep` and **verified on hardware** — installed
+into `/etc` by hand and then confirmed across a cold boot, with no service restarts involved, so
+this is the real startup path and not a reload artefact:
 
 ```sh
+# 1 -- was int32 -9999 on every sensor
 dbus-send --system --print-reply --dest=com.nokia.thermalmanager \
-  /com/nokia/thermalmanager com.nokia.thermalmanager.battery_temperature   # want a real value, not -9999
+  /com/nokia/thermalmanager com.nokia.thermalmanager.battery_temperature          # int32 38
+  # ... .core_temperature                                                          # int32 42
+  # ... .estimate_surface_temperature                                              # int32 37
+  # ... .get_thermal_state                                                         # "normal"
+
+# 2 -- was "unknown"
 dbus-send --system --print-reply --dest=com.nokia.mce \
-  /com/nokia/mce/request com.nokia.mce.request.get_memory_level            # want "normal", not "unknown"
-ssu-sysinfo -f | grep CoverSensor                                          # want no output
+  /com/nokia/mce/request com.nokia.mce.request.get_memory_level                   # "normal"
+  # get_config /system/osso/dsm/memnotify/{warning,critical}/used  -> 738000 / 830000
+
+# 17 -- was 36 features including Feature_CoverSensor
+ssu-sysinfo -f | grep -c CoverSensor                                              # 0, of 35 features
 ```
+
+Each reading was checked against ground truth read at the same instant: battery `38` against
+`/sys/class/power_supply/battery/temp` of 380-385 dC, core `42` against `thermal_zone11` of 42,
+surface `37` as battery minus the configured 1 degree.
+
+Two things worth knowing for anyone repeating this. The surface method is
+`estimate_surface_temperature`, not `surface_temperature` — the latter simply does not exist and
+returns nothing, which looks exactly like a rejected sensor. And `core_temperature` lags: sampled
+25 s after boot it read 50 against a live 43, because dsme had polled during the boot heat spike
+and `minwait` is 60 s. It converged to the sensor value by the next poll and tracked it exactly
+from then on. A single disagreeing sample is not evidence of a bad mapping.
 
 The three genuinely broken items are #3 (watchdog), #9 (suspend) and #21 (log spam); #25 is a
 defconfig gap.
