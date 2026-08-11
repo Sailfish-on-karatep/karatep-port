@@ -9,6 +9,13 @@ Waydroid session and starting a new one restored it.
 **Status: not reproduced, cause unknown.** This page exists so the two theories
 already eliminated are not re-run.
 
+A *different* "touch stopped working" report, 2026-08-11, turned out to be
+memory thrashing rather than anything in the input path
+([rca](waydroid-touch-anr-thrashing.md)). It is not this bug — it recovers by
+itself, leaves `ANR in system` in `logcat` and an ANR trace on disk, whereas this
+one is silent and only ever recovered by restarting the session — but check for
+it first, because it is much the more likely of the two.
+
 ## Why it looked like the resize bug
 
 Touch had failed silently once before, after a display-size change, and the fix
