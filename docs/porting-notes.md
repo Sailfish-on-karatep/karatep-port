@@ -1773,14 +1773,13 @@ done | sort -u
   used to be on this list; it succeeds since it became `Type=oneshot` — see
   [Bluetooth](#the-fix-two-changes-that-only-work-together). `systemd-tmpfiles-setup.service`
   was also on this list and no longer fails.
-* **VoLTE does not register**, and the port *looks* like it does. ofono publishes
-  `IpMultimediaSystem.Registered: true`, but the modem was never asked: this vendor RIL wires
-  `requestRegistrationChange` to QMI IMSS *set IMS test mode* and refuses it with
-  `GENERIC_FAILURE`, and `ofono-binder-plugin-ext-qti` never checks that error before parsing
-  the zeroed reply, in which `REGISTERED == 0`. Calls CSFB to 2G. The missing calls are
-  `setServiceStatus` (transaction 9) and possibly `setConfig` (12, item 33) — neither
-  implemented in ext-qti, and zero prior art in the porter archive →
-  [rca](rca/volte-registration-change-is-test-mode.md).
+* **VoLTE does not register.** The two ofono-side defects are fixed in our ext-qti fork —
+  the plugin no longer reports a refusal as a successful registration (`Registered` now reads
+  `false`, truthfully), and `setServiceStatus` (transaction 9) is implemented and accepted by
+  qcril. What remains is below ofono: every `qcril_qmi_imss_*` operation fails at `qmi send
+  ... res 1` while NAS and UIM work normally, so qcril has no usable QMI IMS Settings client.
+  Do not implement `setConfig` until that is resolved — it is another IMSS message and would
+  fail identically → [rca](rca/volte-registration-change-is-test-mode.md).
 * `org.ofono.NetworkMonitor.GetServingCellInformation` reports **RSRP and RSRQ in each other's
   fields**. Proven over 311 samples: the value under `ReferenceSignalReceivedQuality` spans
   85–101 (valid RIL RSRP 44–140, impossible for RSRQ 3–20) and correlates −0.73 with raw

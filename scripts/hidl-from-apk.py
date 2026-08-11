@@ -297,8 +297,50 @@ def cmd_codes(dex, pattern):
         print(f"{code:4d}  {name}{mark}" if not mark else f"{code:10d}  {name}{mark}")
 
 
+def cmd_layout(dex, pattern):
+    """Recover a HIDL struct's byte offsets from its generated parcel reader.
+
+    `fields` gives the field *set* but not the order, because DEX sorts fields
+    by name -- and the order is what a C struct has to reproduce. The generated
+    readEmbeddedFromParcel() does one
+        _hidl_blob.getInt32(_hidl_offset + N)
+        iput <field>
+    per primitive, so pairing each wide constant with the iput that follows it
+    recovers the offsets directly. Fields read through a nested helper (strings,
+    vecs, embedded structs) show up at their own offset too, since the offset
+    constant is still materialised before the call.
+
+    Cross-check the result against a struct whose layout you already know
+    before trusting it.
+    """
+    for desc, cdo, _svo in dex.classes(lambda d: pattern in d):
+        _s, _i, direct, virtual = dex.class_data(cdo)
+        for midx, code_off in direct + virtual:
+            if not code_off or dex.method(midx)[2] != "readEmbeddedFromParcel":
+                continue
+            insns_size = struct.unpack_from("<I", dex.d, code_off + 12)[0]
+            insns = struct.unpack_from(f"<{insns_size}H", dex.d, code_off + 16)
+
+            print(f"\n=== {desc} ===")
+            last_wide, seen = None, set()
+            for off, op in walk(insns):
+                if op == 0x16:                                  # const-wide/16
+                    v = insns[off + 1]
+                    last_wide = v - 65536 if v > 32767 else v
+                elif op == 0x17:                                # const-wide/32
+                    last_wide = insns[off + 1] | (insns[off + 2] << 16)
+                elif 0x59 <= op <= 0x5F:                        # iput family
+                    fidx = insns[off + 1]
+                    _cls, typ, name = dex.field(fidx)
+                    if last_wide is not None and name not in seen:
+                        seen.add(name)
+                        print(f"    offset {last_wide:3d}   {name:24s} {typ}")
+                        last_wide = None
+
+
 COMMANDS = {
-    "list": cmd_list, "enums": cmd_enums, "fields": cmd_fields, "codes": cmd_codes,
+    "list": cmd_list, "enums": cmd_enums, "fields": cmd_fields,
+    "codes": cmd_codes, "layout": cmd_layout,
 }
 
 if __name__ == "__main__":

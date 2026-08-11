@@ -1,6 +1,8 @@
 # VoLTE never registers — ofono asks the modem the wrong question, then misreads the refusal
 
-**Status: root-caused on hardware, not yet fixed. The remaining fix is new code, not configuration.**
+**Status: two of the three layers fixed and verified on hardware. The third is a vendor-side
+blocker below ofono — see [The layer underneath](#the-layer-underneath-qcrils-qmi-imss-client)
+for where this now stands.**
 
 ofono reports `org.ofono.IpMultimediaSystem` `Registered: true` on karatep. It is not
 registered. Every call — incoming and outgoing — falls back to CS and the modem drops to 2G.
@@ -169,19 +171,76 @@ the OnePlus 6T's EFS partition so the *modem* enabled IMS by itself — the ofon
 what turned it on. So the QMI IMSS config path is unexplored territory here, and there is no
 prior art to follow.
 
-## What would fix it
+## What was done
 
-Implement `setServiceStatus` (code 9) in a fork of `ofono-binder-plugin-ext-qti` and call it
-when ofono asks for IMS registration, instead of — or before — `requestRegistrationChange`:
-`type = VOIP`, `status = STATUS_ENABLED`, `accTechStatus` naming `RADIO_TECH_LTE`. If the
-modem also needs provisioning, add `setConfig` with item 33. Both are new code against a HAL
-nobody has driven this way from Sailfish, so it needs to be tried on hardware before it can be
-claimed.
+Both ofono-side defects are fixed in our fork,
+[`Sailfish-on-karatep/ofono-binder-plugin-ext-qti`](https://github.com/Sailfish-on-karatep/ofono-binder-plugin-ext-qti)
+(branch `hybris-18.1`, built by `scripts/build-extqti.sh`, cloned into `hybris/mw` because that
+directory is not `repo`-managed):
 
-Independently, and regardless of whether that works, ext-qti should stop reporting a failed
-request as a successful registration: `qti_ims_reg_status_response()` must check `result`
-before it touches the payload. That one is a clear upstream bug with a two-line fix, and it is
-what makes this failure so hard to see — the port looks like it has working VoLTE.
+1. **`qti_ims_reg_status_response()` now checks `result` before touching the payload.**
+   Verified on hardware: `IpMultimediaSystem.Registered` reads `false`, which is the truth.
+   The port no longer looks like it has working VoLTE when it does not.
+2. **`setServiceStatus` is implemented** (transaction 9, response 6) and sent alongside the
+   existing registration request.
+
+Two things had to be right for qcril to accept it, and both were found by trying:
+
+- **`accTechStatus` must not be empty.** With an empty list qcril answers `request misses some
+  necessary information` and returns `GENERIC_FAILURE` — indistinguishable, from ofono's side,
+  from the modem refusing. One entry naming `RADIO_TECH_LTE` gets it accepted.
+- **`QtiRadioServiceStatusInfo` could never have matched a parcel.** `hasIsValid`/`isValid` are
+  HIDL `bool` — one byte — but were declared `gboolean`, pushing every later field 8 bytes out
+  and making the struct 72 bytes against the interface's 64. Nothing in ext-qti read or wrote
+  it before, so the bug was invisible. Confirmed fixed against the wire: the request buffer is
+  0x40 = 64 bytes with its two vecs at parent offsets 16 and 40.
+
+With both in place qcril parses the request correctly and gets past validation:
+
+```
+qcril_qmi_imss_request_set_ims_srv_status: has_calltype: 1, calltype: 0
+qcril_qmi_imss_request_set_ims_srv_status: has_status: 1, status: 2
+```
+
+(`status: 0` on Unregister, `2` on Register — `STATUS_ENABLED`. Both fields arrive intact.)
+
+## The layer underneath: qcril's QMI IMSS client
+
+The request is now well-formed, accepted and correctly parsed — and it still fails, one layer
+deeper:
+
+```
+qcril_qmi_imss_request_set_ims_srv_status: .. qmi send async res 1
+sendMessage: msg: IMS_SET_SERVICE_STATUS RESP(type: 2, id: 30), error: 2
+```
+
+That `qmi send ... res 1` is the same failure seen on **every** IMSS operation on this device:
+
+| qcril call | result |
+|---|---|
+| `qcril_qmi_imss_set_ims_test_mode_enabled` (from `requestRegistrationChange`) | `qmi send async res 1` |
+| `qcril_qmi_imss_get_client_provisioning_config` | `qmi send sync res 1` |
+| `qcril_qmi_imss_request_set_ims_srv_status` (from `setServiceStatus`) | `qmi send async res 1` |
+
+Three unrelated IMSS messages, all failing at the send. Meanwhile `qcril_qmi_nas_*` (network
+registration, signal strength) and `qcril_qmi_uim_*` (SIM) work normally throughout. That
+pattern says the problem is not any single message but that **qcril has no usable QMI IMS
+Settings client** — which also explains why IMSA reports `valid 0` on every field: it has never
+received an indication, because the IMS QMI plumbing was never established.
+
+So the blocker has moved out of ofono entirely. The next question is why qcril's IMSS client
+never comes up, given that `imsqmidaemon`, `imsdatadaemon`, `ims_rtp_daemon` and
+`imsrcsservice` all run from boot and `vendor.ims.QMI_DAEMON_STATUS` is 1. Worth checking:
+whether qcril's IMSS client init appears at all in a boot-time logcat, whether it needs
+something the Android framework normally provides, and whether the socket `imsqmidaemon`
+exposes is reachable by `rild` under Sailfish's environment. `setConfig` (transaction 12,
+`CONFIG_ITEM_VOLTE_USER_OPT_IN_STATUS = 33`) is not worth implementing until this is resolved —
+it is another IMSS message and would fail at the same place.
+
+One operational note: reinstalling the plugin RPM **restarts** ofono. On one occasion the old
+process took a SEGV during that restart instead of exiting cleanly; it was not reproducible on
+a repeat, does not occur in normal operation or during IMS registration, and ofono comes back
+either way.
 
 ## Not the causes
 

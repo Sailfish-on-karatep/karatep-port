@@ -17,7 +17,7 @@ README for the full explanation.
 | Script | Run from |
 |---|---|
 | `build-hal.sh`, `build-hybris-boot.sh`, `build-fpservice.sh`, `build-recoveryimage.sh`, `build-los-recovery.sh`, `waydroid/build-waydroid-hwc.sh` | **HABUILD SDK** |
-| `build-hal-packages.sh`, `build-image.sh`, `build-geoclue.sh`, `build-geoclue-inplace.sh`, `build-fpd-rpm.sh`, `waydroid/build-waydroid-rpm.sh` | **PLATFORM SDK** |
+| `build-hal-packages.sh`, `build-image.sh`, `build-geoclue.sh`, `build-geoclue-inplace.sh`, `build-fpd-rpm.sh`, `build-extqti.sh`, `waydroid/build-waydroid-rpm.sh` | **PLATFORM SDK** |
 | `sfossdk`, `habuild`, `mb2`, `sdk-assistant`, `ircgrep.sh`, `sign-installer-zip.sh`, `stage-boot-img.sh`, `install-clean-updater.sh`, `flash.sh`, `make-bootsplash.py`, `devshell.py`, `hidl-from-apk.py` | **HOST** |
 
 `sfossdk`, `habuild`, `mb2` and `sdk-assistant` are thin wrappers whose only job
