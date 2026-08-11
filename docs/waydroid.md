@@ -352,6 +352,36 @@ waydroid init          # downloads ~1 GB; see `waydroid init -h` for image choic
 The spec symlinks `/var/lib/waydroid` → `/home/waydroid`, so the images land on the home partition
 rather than the small rootfs.
 
+### Which images — GAPPS system, HALIUM_11 vendor
+
+The two choices are independent and easy to conflate:
+
+| | Value | Why |
+|---|---|---|
+| **System** (`system_type`) | `GAPPS` | LineageOS 20 with Google Play Services and the Play Store. `VANILLA` and `FOSS` are the alternatives; nothing in this port depends on which one is used |
+| **Vendor** (`vendor_type`) | `HALIUM_11` | **Not `MAINLINE`.** This port runs on the device's own Android 11 vendor partition; `MAINLINE` is for devices with a mainline kernel and no Halium vendor |
+
+Switching the system image on an existing install is `waydroid upgrade`, which reads
+`system_ota` from `waydroid.cfg`. It **never touches `/data`**, so installed apps and their data
+survive, and it leaves `/var/lib/waydroid/overlay/` alone — which matters here, because that is
+where the three hand-installed binaries live (`hwcomposer.waydroid.so`, `camera.waydroid.so`,
+`android.hardware.health@2.0-service.waydroid`). It does `rmtree` `overlay_rw` and `overlay_work`,
+both of which are regenerated at session start.
+
+Two things will waste time if you do not know them:
+
+- **`images.get()` only downloads when the channel's `datetime` is *greater* than the installed
+  `system_datetime`.** Different `romtype`s are not ordered against each other, so switching from a
+  newer VANILLA build to an older GAPPS one is silently a no-op — the log says nothing at all. Set
+  `system_datetime = 0` in `waydroid.cfg` first to force it.
+- **Serve the images over USB, not Wi-Fi.** Measured on this device against the same host and the
+  same file: RNDIS **26 MB/s**, WLAN **398 kB/s**. That is 50 s versus 47 minutes for the 1.3 GB
+  GAPPS zip. Point `system_ota`/`vendor_ota` at the host's `192.168.2.x` address for the duration
+  of the upgrade and put the LAN URL back afterwards.
+
+The zip's sha256 is checked in `images.get()` before extraction, and a mismatch deletes the file
+and raises — so a corrupt download fails loudly rather than installing.
+
 Reboot — `waydroid-container.service` is enabled by `%post` and starts on the next boot. Then either:
 
 - **Settings** → *Waydroid* → start the **Session** service, then launch Waydroid from the

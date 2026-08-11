@@ -106,6 +106,22 @@
 		revision="lineage-18.1" groups="pdk" />
 
 	<!--
+	  external/stub_netd: a stub android.system.net.netd@1.1::INetd, every
+	  method a no-op returning OK. Sailfish disables Android's netd (mer-hybris'
+	  disabled_services.rc renames it to netd_HYBRIS_DISABLED, because connman
+	  owns routing here), but Qualcomm's netmgrd talks to the Netd *HAL*: it
+	  links android.system.net.netd@1.1.so and calls V1_1::INetd::getService.
+	  Without it netmgrd parks forever on "Looking for Netd service", data ports
+	  are never mapped, and dsi_netctrl cannot hand rild a handle, so every data
+	  call dies at "qcril_data_request_setup_data_call: unable to get dsi hndl"
+	  and ofono reports "Unexpected data call status 4100". The stub satisfies
+	  netmgrd without running real netd, so connman keeps routing.
+	-->
+	<project path="external/stub_netd"
+		name="Sailfish-on-karatep/stub_netd"
+		revision="hybris-18.1" />
+
+	<!--
 	  Drop the Chromium WebView patches project. LineageOS' manifest linkfiles
 	  external/chromium-webview/Android.mk, which the patches repo no longer
 	  ships, so repo leaves a dangling symlink and ckati kills the hybris-hal
