@@ -5,6 +5,12 @@
 is a *separate* bug from [fm-radio-enablement.md](fm-radio-enablement.md), which was
 about permission to open the transport; that fix was correct and still stands.
 
+> **This was not what broke FM in the Media app.** The symptoms below match, and this
+> defect is real and reachable, but the app's actual failure was
+> [fm-sandbox-cannot-open-transport.md](fm-sandbox-cannot-open-transport.md) — under
+> sailjail the plugin can never open the SMD channel at all. The mistake that led here
+> was testing a replica of the app *outside* the sandbox, where it does not reproduce.
+
 ## Symptom
 
 With a headset connected (it doubles as the antenna), the FM page in the Media app:
@@ -104,12 +110,12 @@ On the **unpatched** kernel:
 | generate ~400 events with no reader | queue holds exactly **256**; the surplus is gone |
 | power on with a full queue | `RADIO_READY` never queued; `DQBUF` blocks indefinitely |
 
-On the **patched** kernel (`3.18.124-perf-g1a66993ac33a`):
+On the **shipped** kernel (`3.18.124-perf-gd8bdef4db101`):
 
 | stage | result |
 |---|---|
-| 600 tunes with no reader | queue capped at **261** in flight, never grows |
-| eviction | **155** × `event queue full, dropped stale event` — oldest discarded |
+| 600 tunes with no reader | queue capped at **265** in flight, never grows |
+| eviction | **205** × `event queue full, dropped stale event` — oldest discarded |
 | draining after overflow | completes and empties; previously blocked forever |
 | session after a heavy flood | `RADIO_READY` delivered, tuned 100.10 MHz, teardown wakes `DQBUF` |
 
@@ -137,6 +143,13 @@ on are always the most recent ones, so when the queue is full `iris_q_event()` n
 makes room rather than dropping what it was asked to deliver. This also keeps the
 queue self-healing if a reader ever falls behind an RDS burst, and guarantees
 `wake_up_interruptible()` still runs.
+
+`d8bdef4db101` (merged as `46ee720ff1f8`) later bounded that: making room and
+retrying **once** rather than looping until the insert succeeds, because
+`iris_q_event()` runs in softirq context off the rx tasklet and must not spin
+against a concurrent producer. The same change wakes waiters unconditionally --
+every path out of the insert leaves the queue non-empty, and the earlier early
+returns could skip the wakeup.
 
 **Flush the event queue on open.** A new `iris_fops_open()` resets
 `data_buf[IRIS_BUF_EVENTS]` under `buf_lock`, so a session can neither inherit a
