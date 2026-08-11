@@ -1773,17 +1773,36 @@ done | sort -u
   used to be on this list; it succeeds since it became `Type=oneshot` — see
   [Bluetooth](#the-fix-two-changes-that-only-work-together). `systemd-tmpfiles-setup.service`
   was also on this list and no longer fails.
-* `droid-hal-karatep` still needs a rebuild (`build_packages.sh -d`) to pick up the stub Netd
-  HAL binary out of `out/target/product/karatep/system/bin/hw/`. It is verified working, but
-  hand-installed on the test device — an image built today would not carry it.
+* **VoLTE does not register**, and the port *looks* like it does. ofono publishes
+  `IpMultimediaSystem.Registered: true`, but the modem was never asked: this vendor RIL wires
+  `requestRegistrationChange` to QMI IMSS *set IMS test mode* and refuses it with
+  `GENERIC_FAILURE`, and `ofono-binder-plugin-ext-qti` never checks that error before parsing
+  the zeroed reply, in which `REGISTERED == 0`. Calls CSFB to 2G. The missing calls are
+  `setServiceStatus` (transaction 9) and possibly `setConfig` (12, item 33) — neither
+  implemented in ext-qti, and zero prior art in the porter archive →
+  [rca](rca/volte-registration-change-is-test-mode.md).
 * `org.ofono.NetworkMonitor.GetServingCellInformation` reports **RSRP and RSRQ in each other's
   fields**. Proven over 311 samples: the value under `ReferenceSignalReceivedQuality` spans
   85–101 (valid RIL RSRP 44–140, impossible for RSRQ 3–20) and correlates −0.73 with raw
   signal strength, while the value under `ReferenceSignalReceivedPower` sits at 6–14 and is
-  flat (−0.04). True RSRP here is −85..−101 dBm, RSRQ −6..−14 dB. The code location is not
-  yet pinned; `libril` also logs `getSignalStrengthResponse: Invalid response`, meaning the
-  vendor's struct does not match Android 11's `RIL_SignalStrength_v10`, which may be the
-  upstream cause. Zero prior art in the porter archive for that string.
+  flat (−0.04). True RSRP here is −85..−101 dBm, RSRQ −6..−14 dB. Re-confirmed live on
+  `ofono-binder-plugin` after the migration — `ReferenceSignalReceivedQuality: 86`,
+  `ReferenceSignalReceivedPower: 7` in the same reading — so this is **not** an artefact of
+  the old grilio stack. The code location is not yet pinned; `libril` also logs
+  `getSignalStrengthResponse: Invalid response`, meaning the vendor's struct does not match
+  Android 11's `RIL_SignalStrength_v10`, which may be the upstream cause. Zero prior art in
+  the porter archive for that string.
+
+  This also drags the **signal bars** down with it, which is worth knowing before anyone goes
+  hunting for a second bug. `binder_netreg_get_signal_strength_dbm()` only trusts `lte->rsrp`
+  when it falls in the valid RIL range 44–140; ours arrives as 7, fails that check, and ofono
+  silently falls back to the RSSI branch. So the percentage is not RSRP-derived at all.
+  `signalStrengthRange=-110,-70` was tried against this and **is not worth setting**: an
+  A/B with 100 s of settling per arm gave 25 with it and 20 without, but the no-range arm had
+  drifted back to 25 within a few minutes, so the effect is inside the drift. Do not re-add it
+  without a stationary reference. Note also that the first reading after `systemctl restart
+  ofono` is ~1 and climbs for a minute or so — a "1% signal" report right after a restart is a
+  transient, not a fault.
 * `ofonod: Requested file structure differs from SIM: 6fb7` — ofono cannot parse the SIM's
   EF<sub>ECC</sub> emergency-call-code file, so `VoiceCallManager.EmergencyNumbers` falls back
   to `911, 112` with no Indian numbers (100/101/102/108). Safety-relevant.

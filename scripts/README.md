@@ -18,7 +18,7 @@ README for the full explanation.
 |---|---|
 | `build-hal.sh`, `build-hybris-boot.sh`, `build-fpservice.sh`, `build-recoveryimage.sh`, `build-los-recovery.sh`, `waydroid/build-waydroid-hwc.sh` | **HABUILD SDK** |
 | `build-hal-packages.sh`, `build-image.sh`, `build-geoclue.sh`, `build-geoclue-inplace.sh`, `build-fpd-rpm.sh`, `waydroid/build-waydroid-rpm.sh` | **PLATFORM SDK** |
-| `sfossdk`, `habuild`, `mb2`, `sdk-assistant`, `ircgrep.sh`, `sign-installer-zip.sh`, `stage-boot-img.sh`, `install-clean-updater.sh`, `flash.sh`, `make-bootsplash.py`, `devshell.py` | **HOST** |
+| `sfossdk`, `habuild`, `mb2`, `sdk-assistant`, `ircgrep.sh`, `sign-installer-zip.sh`, `stage-boot-img.sh`, `install-clean-updater.sh`, `flash.sh`, `make-bootsplash.py`, `devshell.py`, `hidl-from-apk.py` | **HOST** |
 
 `sfossdk`, `habuild`, `mb2` and `sdk-assistant` are thin wrappers whose only job
 is to force `PLATFORM_SDK_ROOT=/opencloud/SailfishOS`, so nothing resolves into
@@ -53,3 +53,13 @@ Android tree and is public. No private key material is kept in this repo.
 `update-binary` is the shell-fallback recovery installer, which unzips to
 `/data` first to work around the device's RAM limits — see
 `docs/rca/broken-update-binary.md`.
+
+`hidl-from-apk.py` answers "what is this vendor HIDL interface actually shaped
+like on *this* device" by reading the Java classes hidl-gen generated into an
+Android APK — enum values, struct fields, method signatures, and the transaction
+codes, which hidl-gen assigns by declaration order and which the DEX layout does
+not preserve. It needs no apktool, no baksmali and no network. Written for the
+VoLTE work against `/system/system_ext/priv-app/ims/ims.apk`; see
+`docs/rca/volte-registration-change-is-test-mode.md`. Always sanity-check a
+`codes` run against transaction codes your existing client already hardcodes —
+if it reproduces those, the rest can be trusted.
