@@ -1767,16 +1767,46 @@ done | sort -u
 
 ## Still to fix
 
-* IMS daemons (`vendor.imsrcsservice`, `vendor.ims_rtp_daemon`, `vendor.imsdatadaemon`)
-  crash-loop continuously, spamming the journal.
-* Failed systemd units: `droid-bootctl.service`, `systemd-tmpfiles-setup.service`.
+* Failed systemd units: `droid-bootctl.service` and `lxc@multi-user.service` (Waydroid).
   (`dev-binderfs.mount` also fails, but that is expected — binderfs is Linux 5.0+ and this
   kernel is 3.18; the legacy `/dev/{,hw,vnd}binder` nodes are correct.) `wlan-module-load.service`
   used to be on this list; it succeeds since it became `Type=oneshot` — see
-  [Bluetooth](#the-fix-two-changes-that-only-work-together).
-* Mobile data does not work; SIM slot 2 reports "Network: Denied". Neither is confirmed to be a
-  port defect — only a dummy SIM is available, so nothing past SIM detection can be tested.
-* RIL is flaky. (Cameras are no longer — see [Camera](#camera).)
+  [Bluetooth](#the-fix-two-changes-that-only-work-together). `systemd-tmpfiles-setup.service`
+  was also on this list and no longer fails.
+* Mobile data does not work — **root-caused** against a live SIM. Sailfish disables Android's
+  `netd`, but this vendor's `netmgrd` is a client of the Netd *HAL* and parks forever waiting
+  for `android.system.net.netd@1.1::INetd`, so `dsi_netctrl` never hands `rild` a handle and
+  every data call dies at `unable to get dsi hndl`. Fix is `external/stub_netd` →
+  [investigation](rca/mobile-data-no-dsi-handle.md).
+* `org.ofono.NetworkMonitor.GetServingCellInformation` reports **RSRP and RSRQ in each other's
+  fields**. Proven over 311 samples: the value under `ReferenceSignalReceivedQuality` spans
+  85–101 (valid RIL RSRP 44–140, impossible for RSRQ 3–20) and correlates −0.73 with raw
+  signal strength, while the value under `ReferenceSignalReceivedPower` sits at 6–14 and is
+  flat (−0.04). True RSRP here is −85..−101 dBm, RSRQ −6..−14 dB. The code location is not
+  yet pinned; `libril` also logs `getSignalStrengthResponse: Invalid response`, meaning the
+  vendor's struct does not match Android 11's `RIL_SignalStrength_v10`, which may be the
+  upstream cause. Zero prior art in the porter archive for that string.
+* `ofonod: Requested file structure differs from SIM: 6fb7` — ofono cannot parse the SIM's
+  EF<sub>ECC</sub> emergency-call-code file, so `VoiceCallManager.EmergencyNumbers` falls back
+  to `911, 112` with no Indian numbers (100/101/102/108). Safety-relevant.
+* `RILQ: OemHookImpl::sendIndication indicationCb is null`, logged every ~3 s forever because
+  nothing registers an OEM hook callback. Harmless, but it is most of the radio-log noise.
+* RIL is flaky — `ofono` sometimes needs `systemctl restart ofono` after boot. (Cameras are no
+  longer flaky — see [Camera](#camera).) Expected to improve with the migration off the legacy
+  grilio stack to `ofono-binder-plugin`.
+
+**No longer true, corrected against hardware 2026-08-11:**
+
+* *"IMS daemons crash-loop continuously."* They do not. `vendor.imsqmidaemon`,
+  `vendor.imsdatadaemon`, `vendor.ims_rtp_daemon` and `vendor.imsrcsservice` are all
+  `[running]`, started once at boot (`ro.boottime` 13.4–14.0 s) and never restarted, with
+  `vendor.ims.QMI_DAEMON_STATUS=1`. `lshal` confirms
+  `vendor.qti.hardware.radio.ims@1.0::IImsRadio/imsradio0` and `/imsradio1` plus
+  `com.qualcomm.qti.imscmservice@2.0`/`@2.1` registered and live.
+* *"SIM slot 2 reports Network: Denied."* It does not. `/ril_1` comes up 5 s after ofono
+  starts, alongside `/ril_0`, and reads its card correctly (Airtel, MCC 404 / MNC 10, own
+  IMEI, `PinRequired: none`). It reports `searching` because the test SIM is deactivated,
+  which is not a port defect.
 
 ---
 
