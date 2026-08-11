@@ -1779,7 +1779,15 @@ done | sort -u
   qcril. What remains is below ofono: every `qcril_qmi_imss_*` operation fails at `qmi send
   ... res 1` while NAS and UIM work normally, so qcril has no usable QMI IMS Settings client.
   Do not implement `setConfig` until that is resolved — it is another IMSS message and would
-  fail identically → [rca](rca/volte-registration-change-is-test-mode.md).
+  fail identically. Root cause is below that again: the modem offers no IMS QMI services at
+  all (`0x12`/`0x1f`/`0x20`/`0x21` absent from
+  `/sys/kernel/debug/msm_ipc_router/dump_servers`), because no MBN carrier config enabling IMS
+  is active. `/vendor/bin/init.qcom.sh` cannot stage the configs — it copies from a
+  `modem_pr/mcfg/configs` tree this firmware partition does not contain, then sets
+  `ro.vendor.ril.mbn_copy_completed=1` anyway. Staging the eight flat `.mbn` files by hand and
+  setting `persist.vendor.radio.sw_mbn_update=1` repairs the pipeline, but the generic
+  `row.mbn` the modem selects for BSNL leaves IMS off. The modem firmware does contain the
+  VoLTE stack, so this is configuration → [rca](rca/volte-registration-change-is-test-mode.md).
 * `org.ofono.NetworkMonitor.GetServingCellInformation` reports **RSRP and RSRQ in each other's
   fields**. Proven over 311 samples: the value under `ReferenceSignalReceivedQuality` spans
   85–101 (valid RIL RSRP 44–140, impossible for RSRQ 3–20) and correlates −0.73 with raw

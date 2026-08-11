@@ -228,14 +228,106 @@ pattern says the problem is not any single message but that **qcril has no usabl
 Settings client** — which also explains why IMSA reports `valid 0` on every field: it has never
 received an indication, because the IMS QMI plumbing was never established.
 
-So the blocker has moved out of ofono entirely. The next question is why qcril's IMSS client
-never comes up, given that `imsqmidaemon`, `imsdatadaemon`, `ims_rtp_daemon` and
-`imsrcsservice` all run from boot and `vendor.ims.QMI_DAEMON_STATUS` is 1. Worth checking:
-whether qcril's IMSS client init appears at all in a boot-time logcat, whether it needs
-something the Android framework normally provides, and whether the socket `imsqmidaemon`
-exposes is reachable by `rild` under Sailfish's environment. `setConfig` (transaction 12,
-`CONFIG_ITEM_VOLTE_USER_OPT_IN_STATUS = 33`) is not worth implementing until this is resolved —
-it is another IMSS message and would fail at the same place.
+`setConfig` (transaction 12, `CONFIG_ITEM_VOLTE_USER_OPT_IN_STATUS = 33`) is not worth
+implementing: it is another IMSS message and would fail in the same place.
+
+### Why the IMSS client never comes up
+
+Restarting `rild` alone and capturing its whole startup (the earlier captures all began long
+after boot, so this had never been seen) gives the answer:
+
+```
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for VOICE
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for DMS
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for NAS
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for PBM
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for RF SAR
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for WMS
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (0) for RFRPE
+qcril_qmi_init_ssr_excluded_client_handles: ... status((-3) QMI_TIMEOUT_ERR) for 10
+qcril_qmi_init_ssr_excluded_client_handles: ... status((-3) QMI_TIMEOUT_ERR) for 12
+qcril_qmi_client_send_msg_sync: svc 12 is not initialized
+```
+
+Everything qcril needs initialises except the IMS clients, which **time out**. `svc 12` is
+IMSS — hence `res 1` on every send afterwards. This is not a boot race: it reproduces on a
+`rild` restart hours after `imsqmidaemon` has been up.
+
+They time out because the services are not there. `/sys/kernel/debug/msm_ipc_router/dump_servers`
+lists every QMI service on the IPC router, and the modem (node 0) offers:
+
+```
+0x01 0x02 0x03 0x04 0x05 0x07 0x08 0x09 0x0a 0x0b 0x0c 0x0f 0x10 0x11 0x16 0x17 0x18
+0x1a 0x1d 0x22 0x24 0x29 0x2a 0x2b 0x2e 0x2f 0x30 0x36 0x37
+```
+
+**`0x12` (IMS), `0x1f` (IMSP), `0x20` (IMSVT) and `0x21` (IMSA) are all absent**, while every
+service qcril initialised successfully is present. The mapping is self-checking: each client
+qcril reports as OK corresponds to a service in that list, and the ones that time out do not.
+
+The modem is not refusing IMS. **The modem is not offering IMS at all.**
+
+### The MBN carrier config was never loaded — and that is a real, separate bug
+
+`persist.vendor.radio.sw_mbn_loaded` was unset and qcril skipped MBN handling entirely.
+Setting `persist.vendor.radio.sw_mbn_update=1` makes the state machine run, and it then fails
+concretely:
+
+```
+qcril_mbn_sw_load_to_db: QCRIL_ERROR:IO: No sw mbn config directory
+qcril_mbn_sw_update_init_hdlr: MBN file info update in DB failed...
+```
+
+`/vendor/bin/init.qcom.sh` is supposed to populate `/data/vendor/radio/modem_config/mcfg_sw/`
+by copying `/vendor/firmware_mnt/image/modem_pr/mcfg/configs/*`. **That tree does not exist on
+this device** — `/vendor/firmware_mnt/image/` has no subdirectories at all, and
+`/vendor/firmware_mnt/verinfo/ver_info.txt` is missing too, so the version guard always takes
+the copy branch and every `cp` inside it fails. The script then runs
+`setprop ro.vendor.ril.mbn_copy_completed 1` unconditionally, so nothing ever reports a
+problem. The per-carrier flat files the script also names (`3uk`, `gcf`, `mexico`, `ntel`,
+`rjil`, `row`, `smtf`, `ytl`) *are* present in `image/`.
+
+Staging those eight into `/data/vendor/radio/modem_config/mcfg_sw/` by hand fixes the pipeline
+end to end — `Total number of files retrieved: 8`, `Selected config ... row.mbn`,
+`qcril_qmi_pdc_activate_config_ind_hdlr: activate successful`, `sw_mbn_loaded=1`. (Note
+`cp --preserve=m` from the vendor script is a GNU-ism the device's `cp` rejects; plain `cp`
+works.) Worth knowing: the config the modem had been running was
+`OTA_/data/misc/radio/modem_config/mcfg_sw/row.mbn1574430761` — an OTA-updated `row.mbn` from
+the stock ROM, pointing at the pre-Android-11 `/data/misc/radio` path.
+
+**But it does not enable IMS.** After a full reboot with `row.mbn` selected and activated, the
+modem's service list is byte-identical — still no `0x12`/`0x1f`/`0x20`/`0x21`. `row.mbn` is
+the generic "rest of world" config and the smallest of the eight (8.5 KB); it evidently leaves
+IMS off. Telephony is otherwise healthy afterwards (registered, LTE, BSNL).
+
+The modem itself is not the limitation. Its firmware —
+`MSM8937.LA.2.0-00440-STD.PROD-1.102262.2.113053.1` — contains the whole VoLTE stack:
+`PDPRATHandlerVoLTE.cpp`, `RegisterManager.cpp:CRegistrationHandlerVoLTE`,
+`IMSSupplementaryService.cpp`. So VoLTE is present in the modem and disabled by configuration.
+
+### Where it stands
+
+The remaining question is which carrier configuration turns IMS on for **BSNL (MCC 404 / MNC
+80)**. None of the eight bundled configs is BSNL; the only Indian one is `rjil.mbn` (Reliance
+Jio, a VoLTE-only carrier, 30 KB against `row.mbn`'s 8.5 KB), which almost certainly enables
+IMS but carries Jio's APN and policy settings. Forcing it on a BSNL SIM is the obvious
+experiment and is reversible — re-select `row.mbn`, or delete
+`/data/vendor/radio/modem_config` and reboot — but it can disturb network attach in the
+meantime, so it is a deliberate decision rather than a routine step.
+
+This is the same class of problem as the one success in the porters archive:
+Mister_Magister's OnePlus 6T got VoLTE only after flashing a carrier MBN so that the *modem*
+enabled IMS (2025-09-01). Nothing on the Sailfish side can substitute for it.
+
+### Device state
+
+The test device carries two changes that survive reboot and are **not** in any package:
+
+- `persist.vendor.radio.sw_mbn_update=1`
+- `/data/vendor/radio/modem_config/mcfg_sw/` populated with the eight `.mbn` files
+
+Both are safe to keep — they repair a vendor script that cannot work as written — but a
+freshly flashed device will not have them.
 
 One operational note: reinstalling the plugin RPM **restarts** ofono. On one occasion the old
 process took a SEGV during that restart instead of exiting cleanly; it was not reproducible on
