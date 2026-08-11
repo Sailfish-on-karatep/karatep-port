@@ -305,15 +305,72 @@ The modem itself is not the limitation. Its firmware —
 `PDPRATHandlerVoLTE.cpp`, `RegisterManager.cpp:CRegistrationHandlerVoLTE`,
 `IMSSupplementaryService.cpp`. So VoLTE is present in the modem and disabled by configuration.
 
-### Where it stands
+### Why BSNL gets a config with no IMS in it
 
-The remaining question is which carrier configuration turns IMS on for **BSNL (MCC 404 / MNC
-80)**. None of the eight bundled configs is BSNL; the only Indian one is `rjil.mbn` (Reliance
-Jio, a VoLTE-only carrier, 30 KB against `row.mbn`'s 8.5 KB), which almost certainly enables
-IMS but carries Jio's APN and policy settings. Forcing it on a BSNL SIM is the obvious
-experiment and is reversible — re-select `row.mbn`, or delete
-`/data/vendor/radio/modem_config` and reboot — but it can disturb network attach in the
-meantime, so it is a deliberate decision rather than a routine step.
+Loading the configs makes qcril build two lookup tables in `/data/vendor/radio/qcril.db` —
+`qcril_sw_mbn_iin_table` (by SIM IIN, the ICCID prefix) and `qcril_sw_mbn_mcc_mnc_table` — each
+carrying a `VOLTE_INFO` column. Pulling that database off the device answers the question
+outright:
+
+| config | matches | VoLTE |
+|---|---|---|
+| `3uk.mbn` | MCC 234/20, 235/94 | VOLTE |
+| `mexico.mbn` | MCC 334/5, 334/9, 334/50, 334/90 | VOLTE |
+| `rjil.mbn` | MCC **405**/840…874 (Jio) | VOLTE |
+| `ytl.mbn` | MCC 502/152 | VOLTE |
+| `smtf.mbn` | MCC 510/9, 510/28 | VOLTE |
+| `ntel.mbn` | MCC 621/40 | VOLTE |
+| `gcf.mbn` | MCC 1/1 (conformance) | VOLTE |
+| `row.mbn` | IIN `wild` — **no MCC/MNC rows at all** | — |
+
+**There is no MCC 404 entry anywhere.** India's MCC is 404 for most operators (BSNL is 404/80);
+Jio is the exception at 405. So a BSNL SIM matches nothing, falls through to the `wild`
+catch-all `row.mbn`, and that config carries exactly one IMS NV item (`IMS_enable`) against
+`rjil.mbn`'s 49. The modem is told "IMS on" with no IMS configuration behind it and never
+brings the stack up. That is the whole failure, end to end.
+
+Forcing `rjil.mbn` by staging it alone does **not** work: the configs are loaded into the
+*modem*, not just qcril, and the modem does the matching. With a BSNL SIM it will not select a
+Jio config no matter which files are on disk.
+
+### These files are unsigned, so a correct config can be built
+
+Each MBN is an ELF with three segments and a 136-byte hash segment — a 40-byte header plus
+three SHA-256 hashes — and **zero trailing bytes**: no RSA signature, no certificate chain. The
+scheme reproduces exactly:
+
+```
+hash[0] = SHA-256(ELF header + program headers)   <- matches
+hash[1] = 00 * 32                                 <- the hash segment itself
+hash[2] = SHA-256(MCFG payload)                   <- matches
+```
+
+The carrier metadata is equally accessible: in `rjil.mbn` the `MCFG_TRL` trailer sits at
+0x7520 and the MCC/MNC pairs are plain adjacent little-endian 16-bit values (405 at 0x75ba,
+840 at 0x75bc). So editing a config's carrier match and rehashing it is straightforward.
+
+Two routes follow, and they are not equivalent:
+
+1. **Relabel `rjil.mbn` to match 404/80.** Cheap and local. Brings Jio's 49 IMS items — but
+   also Jio's APN and VoWiFi settings (`epdg_fqdn:vowifi.jio.com`), which are wrong for BSNL.
+   Good enough to *prove* the mechanism; questionable as a shipped configuration.
+2. **Source a config that genuinely covers MCC 404.** Any Indian-market MSM8937/8953 firmware
+   is likely to carry one. Note also that the config this modem ran under stock was
+   `OTA_..row.mbn1574430761` — a 2019 OTA-updated `row.mbn`, newer than the 2017 file on the
+   firmware partition and lost with the data wipe. If VoLTE worked on Android here, that file
+   is the most likely reason and the best thing to hunt for.
+
+### Operational notes for anyone continuing this
+
+- `init.qcom.sh` runs `rm -rf /data/vendor/radio/modem_config` on **every boot** before its
+  failing copy, so any staging is destroyed at reboot. A permanent fix needs a boot-time unit
+  ordered before `rild`, not a one-off copy.
+- qcril skips reloading when `persist.vendor.radio.sw_mbn_loaded` is 1 — set it to 0 to force
+  re-evaluation, then restart `rild` (`setprop ctl.restart ril-daemon`).
+- Do **not** delete `/data/vendor/radio/qcril.db` to force a reload; it is the wrong lever and
+  it breaks the load with `db add sw mbn file failed` until the database is restored.
+- Repeated `rild` restarts leave `ofono` dead (`systemctl restart ofono` recovers it), so check
+  it before concluding anything about telephony.
 
 This is the same class of problem as the one success in the porters archive:
 Mister_Magister's OnePlus 6T got VoLTE only after flashing a carrier MBN so that the *modem*
