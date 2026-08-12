@@ -1247,6 +1247,43 @@ This is the same class of problem as the one success in the porters archive:
 Mister_Magister's OnePlus 6T got VoLTE only after flashing a carrier MBN so that the *modem*
 enabled IMS (2025-09-01). Nothing on the Sailfish side can substitute for it.
 
+### This is packaged now
+
+`droid-config-karatep` ships `karatep-modem-config.service` and
+`/usr/bin/droid/karatep-modem-config.py`, so the carrier-config work survives a flash
+rather than living in one device's `/data`. Verified present in the built RPM, including
+the `multi-user.target.wants` symlink.
+
+Design points worth keeping:
+
+- **No proprietary bytes are in the repo.** The configs are read from the device's own
+  `/vendor/firmware_mnt/image` at runtime and `row.mbn` is patched in place, matching this
+  port's existing convention of using the device's vendor partition rather than
+  redistributing it. The patcher parses the ELF instead of using fixed offsets, refuses to
+  write if anything is unexpected, and was checked to produce a file **byte-identical** to
+  the one `mbn-mcfg-tools` builds.
+- **Only the verified change is shipped** — `IMS_enable` and `voice_domain_pref`, the two
+  that demonstrably bring IMS QMI services up. The 46-item import and the data profile are
+  deliberately left out: their effect was measured through a HAL return code that has since
+  been shown to be meaningless.
+- **Software configs are identified by their MCFG payload, not by filename.**
+  `/vendor/firmware_mnt/image` also holds `mba.mbn`, which is the modem boot authenticator
+  and not an MCFG at all, and `mcfg_hw.mbn`, which belongs elsewhere. A first draft staged
+  both; testing on hardware caught it.
+- **The unit waits for `ro.vendor.ril.mbn_copy_completed`** rather than trusting ordering
+  against `droid-hal-init`, which is `Type=simple` and reports started at fork while
+  `init.qcom.sh`'s `rm -rf` runs asynchronously afterwards — the same trap
+  `droid-fm-up.service` documents.
+- **Once per install, not once per boot.** The modem keeps an activated configuration
+  across reboots, so a marker file short-circuits later boots and the single `rild` restart
+  is paid once. If `/data` is wiped the marker goes with it and it runs again.
+
+One caveat for this particular handset: the packaged config bumps the vendor file's MCFG
+minor from 50 to 51, while the test device's modem is still carrying the experimental v58
+build. qcril skips a config whose version is not newer, so on *this* device the packaged
+config will not be loaded until the modem is given something above 58. A freshly flashed
+device has no such history and takes 51 normally.
+
 ### Device state
 
 The test device carries these changes, which survive reboot and are **not** in any package:
