@@ -657,17 +657,61 @@ qcril_data_process_qmi_dsd_ind: pdn[0] name=bsnlnet
 One PDN, no `rmnet_data*` addresses, no IMS PDN, `error_code: 0`, unchanged across a
 reboot. Nothing refuses anything any more; the modem simply never starts a registration.
 
-Open threads, in the order worth pulling:
+### The IMS PDN: ofono has one and never activates it
 
-1. **The IMS PDN.** Nothing ever requests one. `rjil.mbn` carries
-   `data/ds_dsd_attach_profile.txt` (`Attach_Profile_ID:1`) and `Data_Profiles/Profile1`
-   (the default profile, no APN) alongside its `Profile2`; the patched config has only
-   `Profile2`. Whether the modem needs the full trio, or needs the IMS APN reachable at LTE
-   attach, is untested.
-2. **The missing QMI service.** `0x20` has never appeared, at any point, under any config.
+Nothing in the modem was ever going to request it. ofono already has the context —
+`/ril_0/context3`, `Type: ims`, `AccessPointName: ims`, `Active: false` — and activating it
+by hand brings up a real IMS bearer:
+
+```
+qcril_data_apn_based_profile_look_up_using_qdp: qdp param PROFILE_ID = [2]
+qcril_data_apn_based_profile_look_up_using_qdp: successfully looked up 3gpp profile id [2]
+RIL_REQUEST_SETUP_DATA_CALL (27) Complete ... Success
+qcril_data_process_qmi_dsd_ind: pdn[0] name=bsnlnet
+qcril_data_process_qmi_dsd_ind: pdn[1] name=ims
+rmnet_data1  inet 10.67.1.133/30
+```
+
+Two things worth keeping from that. The profile lookup lands on **`PROFILE_ID = [2]`** —
+the `Data_Profiles/Profile2` we imported, so that work is doing exactly what it was meant
+to. And one line fails:
+
+```
+qcril_data_set_apn_types: Failed to set apn type rc [0] result [1] error [57]
+```
+
+qcril cannot tag the call with its APN types. A PDN that is not tagged as the IMS APN type
+is plausibly not a PDN the modem's IMS stack will bind to, which would make this bearer
+useless to it however correct the APN string is. That points at
+`ofono-binder-plugin` rather than the carrier config: the radio HAL's `DataProfileInfo`
+carries `supportedApnTypesBitmap`, and if ofono does not set it for the IMS context there
+is nothing for qcril to tag with. **This is the most promising open lead.**
+
+### RegOnMode: the imported config registers only on a call
+
+`qp_ims_reg_config` as shipped by Jio carries `RegOnMode = OnCall (1)` — the IMS
+registration manager registers when a call is placed, not when IMS becomes available.
+Wholesale-importing another operator's IMS parameter set brings that along, and it produces
+exactly the symptom seen: every request succeeds, the modem reports no error, and nothing
+ever registers while idle.
+
+`scripts/mbn-set-regonmode.sh` flips it to `PowerOn (0)`, which is what an
+always-registered stack and a VoLTE indicator need. Verified in the packed file. It did
+**not** by itself produce a registration, with or without the IMS bearer up, so it is a
+correctness fix rather than the answer.
+
+### Open threads
+
+1. **`supportedApnTypesBitmap` on the IMS context** — see above. Check what
+   `ofono-binder-plugin` puts in `DataProfileInfo` for a `Type: ims` context, and whether
+   `qcril_data_set_apn_types` stops failing when it is set.
+2. **ofono never activates the IMS context on its own.** Even once that is fixed, something
+   has to bring the context up when IMS registration is wanted; right now it only happens
+   by hand over D-Bus.
+3. **The missing QMI service.** `0x20` has never appeared, at any point, under any config.
    qcril's presence write failing is consistent with the presence service being the absent
    one, but that identification is not proven and should be established rather than assumed.
-3. **The one item we cannot set.** If `VOLTE_USER_OPT_IN_STATUS` is genuinely the flag the
+4. **The one item we cannot set.** If `VOLTE_USER_OPT_IN_STATUS` is genuinely the flag the
    Xiaomi code writes, then this modem refusing that write may be the whole remaining story
    — and the fix would be to set the underlying NV item through the carrier config instead
    of over QMI, the same way `IMS_enable` and `qipcall_config_items` were.
