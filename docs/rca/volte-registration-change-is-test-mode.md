@@ -1054,6 +1054,29 @@ the NV item behind client provisioning and set it through the carrier config, th
 `IMS_enable` and `qipcall_config_items` were — which is a route this port has already proven
 it can take.
 
+**Reading it a second time proved harder than reading it once.** Five attempts to re-capture
+`client_prov_enabled` after a `setConfig` all failed, in three distinct ways, and the reason
+matters for anyone repeating this:
+
+- With `ril_extra_debug=1` the radio log is fast enough that `logcat` dies with
+  `Unexpected EOF!` after about 20 seconds — the overrun this port's own notes already
+  warn about, walked straight back into.
+- `logcat -d` is no help either: with that verbosity the radio buffer holds **17 seconds**
+  (`-G 16M` notwithstanding), so by the time a test sequence finishes the interesting lines
+  are long gone.
+- Filtering inside the device pipeline keeps the file small but does not save `logcat`
+  itself, which still overruns and takes the pipeline with it.
+
+The one successful capture set the three properties and restarted `rild` in the same run,
+with an unfiltered stream started two seconds earlier. Later runs with the properties
+already set never reproduced the `[main] get_client_provisioning_config` lines at all, which
+suggests those may only be emitted by a qcril that starts *after* the settings change. Not
+understood; recorded so the next attempt starts from the working recipe rather than
+rediscovering the failures.
+
+`ril_extra_debug` and `ril_log_enabled` have been set back to `0` — they flood the log and
+degrade the device — but they are the lever, and they ship empty.
+
 Also noted in passing: `persist.vendor.radio.vdp_on_ims_cap` is empty, and
 `qcril_qmi_imss_update_wifi_pref_from_ind_to_qcril_data` fails with
 `qcril_data_set_rat_preference res = 501 / QCRIL DATA API returned error` on every init.
