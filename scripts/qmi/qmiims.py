@@ -145,7 +145,22 @@ def show(tlvs):
 
 
 def main():
-    imss = Imss()
+    port = 0x37
+    if len(sys.argv) > 1 and sys.argv[1].startswith("port:"):
+        port = int(sys.argv[1][5:], 0)
+        del sys.argv[1]
+    imss = Imss(port=port)
+    if port != 0x37:
+        print("== service at port 0x%02x ==" % port)
+        for a in sys.argv[1:]:
+            mid = int(a, 0)
+            print("\n== msg 0x%02x ==" % mid)
+            try:
+                show(imss.call(mid))
+            except socket.timeout:
+                print("  timed out")
+        imss.close()
+        return 0
 
     print("== get_ims_service_enable_config (0x%02x) ==" % QMI_IMSS_GET_SERVICE_ENABLE)
     try:
@@ -154,6 +169,33 @@ def main():
         print("  timed out -- no response from imss")
         imss.close()
         return 1
+
+    if len(sys.argv) > 3 and sys.argv[1] == "sweep":
+        lo = int(sys.argv[2], 0)
+        hi = int(sys.argv[3], 0)
+        ok, err = [], {}
+        for mid in range(lo, hi + 1):
+            try:
+                tlvs = imss.call(mid, timeout=1.0)
+            except socket.timeout:
+                continue
+            res = None
+            for tg, v in tlvs:
+                if tg == QMI_RESULT_TLV and len(v) >= 4:
+                    res = struct.unpack("<HH", v[:4])
+            if res is None:
+                continue
+            if res[0] == 0:
+                ok.append((mid, len(tlvs)))
+            else:
+                err.setdefault(res[1], []).append(mid)
+        print("\nimplemented (result OK):")
+        for mid, n in ok:
+            print("  0x%02x  %d tlv(s)" % (mid, n))
+        for e in sorted(err):
+            print("error %d: %s" % (e, " ".join("0x%02x" % m for m in err[e])))
+        imss.close()
+        return 0
 
     if len(sys.argv) > 2 and sys.argv[1] == "get":
         for a in sys.argv[2:]:
@@ -171,8 +213,10 @@ def main():
         tag = int(sys.argv[3], 0)
         val = int(sys.argv[4], 0)
         back = int(sys.argv[5], 0) if len(sys.argv) > 5 else msg + 1
-        print("\n== set msg 0x%02x, tlv 0x%02x = %d ==" % (msg, tag, val))
-        tlv = struct.pack("<BHB", tag, 1, val)
+        width = int(sys.argv[6], 0) if len(sys.argv) > 6 else 1
+        print("\n== set msg 0x%02x, tlv 0x%02x = %d (%d byte) ==" %
+              (msg, tag, val, width))
+        tlv = struct.pack("<BH", tag, width) + val.to_bytes(width, "little")
         try:
             show(imss.call(msg, tlv))
         except socket.timeout:

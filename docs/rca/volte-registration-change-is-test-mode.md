@@ -1431,6 +1431,52 @@ that was raised earlier, and closes it from the handset side rather than by argu
 `wifi_call_preference` — this modem's provisioning response carries no `enable_volte`
 TLV at all, so the flag that looked like the blocker was never one.
 
+### The modem's IMS Settings service refuses to enable IMS
+
+Talking to QMI IMS Settings (0x12) directly over the MSM IPC router removes the
+vendor HAL, qcril and ofono from the path entirely (`scripts/qmi/qmiims.py`).
+What it finds moves the fault decisively into the modem firmware.
+
+**A correction first.** It was recorded here that the vendor HAL "accepts
+setServiceStatus and drops it", on the strength of a log capture that showed no
+qcril response. That was a bad filter, not a finding: the capture searched for
+`service_status`, and qcril's function is `qcril_qmi_imss_request_set_ims_srv_
+status_v02` -- `srv_status`. The call is handled, and qcril sends QMI message
+0x8f for it. The HAL is innocent.
+
+**What actually happens** is that the modem rejects it. Sweeping the imss
+message space separates three cases cleanly, because QMI distinguishes them:
+
+| result | meaning | messages |
+|---|---|---|
+| `QMI_ERR_INVALID_MESSAGE_ID` (57) | not implemented in this firmware | most of 0x01-0x1d, and ~40 others |
+| `QMI_ERR_MISSING_ARG` (17) | implemented, wants TLVs | 0x1f, 0x66, 0x89 |
+| `QMI_ERR_INTERNAL` (3) | implemented, fails inside the modem | **0x8f, 0x90**, 0x1f with a valid TLV, and ~30 more |
+
+`0x8f` and `0x90` are set/get of the IMS service enable config. They are *not*
+unimplemented -- an unimplemented id answers 57 -- they exist and fail
+internally, on every TLV tag and width tried. That is the only mechanism that
+turns the modem's IMS services on, which is why `imsa` reports every service
+unavailable and why no SIP is ever sent.
+
+### Client provisioning does work, and the earlier reading of it was wrong
+
+Two things previously recorded about `client_prov_enabled` were mistaken.
+
+It was written that the modem "carries no `enable_volte` TLV at all, only
+`wifi_call`". It does -- response TLV 0x11 -- qcril simply does not log it on
+the path that was captured.
+
+And its refusal to move was not the modem refusing. **Request TLVs are offset
+by one from response TLVs**, which showed up by accident: writing tag 0x18 came
+back as response field 0x19. So `enable_volte` is written as 0x10 and read as
+0x11, and every earlier attempt had written 0x11 -- which is `enable_vt`. With
+the correct tag it takes immediately and `enable_volte` now reads 1.
+
+It changes nothing. IMS still does not register and the modem still sends no
+SIP, so client provisioning was never the gate either -- but the value is now
+right, and the mechanism is understood rather than assumed.
+
 ### The donor is carrier-neutral
 
 Jio's `rjil.mbn` is the only same-generation donor available: the Nokia 6 generic ROW
