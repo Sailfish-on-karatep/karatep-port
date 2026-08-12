@@ -648,6 +648,27 @@ So the current state of the device is: IMS enabled in NV, voice domain IMS-prefe
 IMS parameter set present, an IMS data profile present, `VLT_SETTING_ENABLED = 1` accepted,
 the VoLTE service status accepted — and every request the stack makes now returns success.
 
+### Why the Pixel/Xiaomi class of fix has nothing left to give us
+
+[`kyujin-cho/pixel-volte-patch`](https://github.com/kyujin-cho/pixel-volte-patch) is the
+best-documented example of the genre, and reading what it actually does is a useful
+negative result. It calls `telephony.ICarrierConfigLoader.overrideConfig()` through Shizuku
+to force the carrier-config values that `ImsManager.isVolteEnabledByPlatform()` checks —
+entirely inside the Android framework, no root, and explicitly **nothing to the modem**.
+The Xiaomi `*#*#86583#*#*` code is the same idea by another route.
+
+That whole family of fixes exists to make the *framework* stop hiding the VoLTE switch. We
+have no framework: ofono consults no carrier database, hides nothing, and calls the vendor
+HAL directly. We are already past the layer those patches operate on, and have been since
+`setServiceStatus` started being accepted.
+
+The useful inference runs the other way. On a working Android handset the framework, once
+unblocked, does nothing to the modem beyond the provisioning calls — and those are exactly
+the calls we already make and that this modem already accepts. So a stock device with this
+firmware would be issuing the same sequence we issue and getting a registration. Our
+remaining gap is therefore below that line: in the modem's own configuration or state, not
+in a command we have failed to send.
+
 ### Still not registering
 
 ```
@@ -822,6 +843,15 @@ and it corroborates the diagnosis rather than complicating it:
   it is the same class of bug as ours.
 - BSNL requires VoLTE to be provisioned per subscriber: SMS `ACTVOLTE` to 53733, or ask at a
   BSNL office. Worth doing before drawing conclusions from any modem-side experiment.
+  (Done here, and shown to be irrelevant: the SIM already does VoLTE in another handset.)
+
+A note on carrier-side device whitelisting, since it is the obvious thing to suspect and
+several Indian operators have done it: it does not fit this evidence. A network that
+refuses a handset still lets the modem **attempt** registration and answers with a
+rejection. This modem reports `error_code 0`, never asks for an IMS PDN of its own, and
+never emits an attempt at all. Nothing on the network side can suppress an attempt that is
+never made, so the block is local. Cheap to ask the operator anyway; not a hypothesis worth
+spending effort on.
 
 Public MBN corpora exist (`JohnBel/QualcommMBNs`) but are organised by donor handset and carry
 no MCC 404 profile. Tooling: `sbaresearch/mbn-mcfg-tools` (parse/pack/verify),
