@@ -43,9 +43,10 @@ trap 'rm -rf "$DIR"' EXIT
 "$VENV/bin/mbn-tool" -c "$IN"
 "$VENV/bin/mbn-tool" -e "$IN" "$DIR/x"
 
-python3 - "$DIR/x/files" <<'PY'
-import pathlib, sys
-base = pathlib.Path(sys.argv[1])
+python3 - "$DIR/x" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+base = root / 'files'
 for rel, val in (('nv/item_files/ims/IMS_enable', 1),
                  ('nv/item_files/modem/mmode/voice_domain_pref', 3)):
     p = base / rel
@@ -57,6 +58,31 @@ for rel, val in (('nv/item_files/ims/IMS_enable', 1),
     print(f'{rel}: {b[1]} -> {val}')
     b[1] = val
     p.write_bytes(bytes(b))
+
+# Bump the minor version. qcril compares the selected config's MCFG version
+# against what the modem already has active and skips the reload when they
+# match -- so an edit that leaves the version alone is silently ignored. The
+# version is four bytes, [minor, carrier, oem, family], and appears three
+# times: meta.version and the trailer's version1/version2, which must agree.
+meta = json.loads((root / 'meta').read_text())
+
+
+def bump(field):
+    b = bytearray.fromhex(field['hex'])
+    if b[0] == 0xff:
+        sys.exit('minor version is already 0xff; pick another field to bump')
+    b[0] += 1
+    field['hex'] = ' '.join(f'{x:02x}' for x in b)
+    field['ascii'] = bytes(b).decode('latin-1')
+    return b[0]
+
+
+old = bytearray.fromhex(meta['version']['hex'])[0]
+new = bump(meta['version'])
+bump(meta['trailer']['version1'])
+bump(meta['trailer']['version2'])
+print(f'MCFG minor version: {old} -> {new}')
+(root / 'meta').write_text(json.dumps(meta, indent=2))
 PY
 
 "$VENV/bin/mbn-tool" -p "$OUT" "$DIR/x"
@@ -73,6 +99,19 @@ for rel, want in (('nv/item_files/ims/IMS_enable', 1),
     got = v['value'] if isinstance(v, dict) else v
     assert got == want, f'{rel}: read back {got}, wanted {want}'
     print(f'verified {rel} = {v}')
+PY
+
+python3 - "$DIR/v/meta" "$DIR/x/meta" <<'PY'
+import json, sys
+got = json.load(open(sys.argv[1]))
+want = json.load(open(sys.argv[2]))
+for path in (('version',), ('trailer', 'version1'), ('trailer', 'version2')):
+    g = w = None
+    g, w = got, want
+    for k in path:
+        g, w = g[k], w[k]
+    assert g['hex'] == w['hex'], f'{path}: {g["hex"]} != {w["hex"]}'
+    print(f'verified {".".join(path)} = {g["hex"]}')
 PY
 
 echo "wrote $OUT"

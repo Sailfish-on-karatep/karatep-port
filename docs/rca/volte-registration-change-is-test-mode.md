@@ -416,6 +416,93 @@ OTA-updated `row.mbn`, newer than the 2017 file on the firmware partition and lo
 data wipe. It is still the most interesting artefact to hunt for, but on the same timeline it
 would predate BSNL VoLTE too.
 
+### Getting qcril to actually load it: two more gates
+
+Staging the patched file and forcing a reload is not enough. qcril's SW-MBN state
+machine has two further gates, and both are silent when they block.
+
+**Gate 1: the selection flags.** `qcril_qmi_sw_mbn_select_mbn` builds its database query
+from `persist.vendor.radio.sw_mbn_volte` and `persist.vendor.radio.sw_mbn_openmkt`. Both
+are **empty** on this device, and with them empty the state machine loads all eight configs
+into `qcril.db`, never runs a selection query, then deletes every inactive config from the
+modem and stops. Set both to `1` and the cascade appears in the log:
+
+```
+select FILE from qcril_sw_mbn_mcc_mnc_table where MCC='404' and MNC='80' and VOLTE_INFO='VOLTE' ...
+select FILE from qcril_sw_mbn_iin_table    where MCFG_IIN='8991805' ...
+select FILE from qcril_sw_mbn_iin_table    where MCFG_IIN='899180'  ...
+select FILE from qcril_sw_mbn_iin_table    where MCFG_IIN='wild'      -> row.mbn
+```
+
+which is the falling-through-to-the-wildcard behaviour, now visible rather than inferred.
+Note `row.mbn` **is** tagged `VOLTE`/`OPENMKT`/`COMMERC` in `qcril_sw_mbn_iin_table`, as is
+every other config — the tags come from naming convention, not from contents, so they are
+worthless as evidence about what a config does. An earlier version of this document read
+those tags as meaningful; they are not.
+
+**Gate 2: the MCFG version.** Having selected `row.mbn`, qcril compares its
+`MCFG_VERSION_{FAMILY,OEM,CARRIER,MINOR}` against the config the modem already has active
+and skips the reload when they match. Editing NV values without touching the version
+therefore changes nothing, silently — the modem keeps the copy it loaded before. The
+version is four bytes `[minor, carrier, oem, family]` appearing three times in the file
+(`meta.version`, `trailer.version1`, `trailer.version2`), all of which must agree.
+`patch-mbn-ims.sh` bumps the minor (50 → 51 here) for exactly this reason.
+
+With both gates open the whole pipeline runs:
+
+```
+qcril_qmi_pdc_load_configuration: load_size is 8564, conf_size is 8564
+qcril_mbn_sw_send_load_config_resp: Select config for APPS SUB0
+qcril_qmi_pdc_activate_config_ind_hdlr: activate successful
+qcril_mbn_sw_send_activate_config_resp: Activation completed
+```
+
+**and the modem publishes IMS QMI services for the first time.** `dump_servers` went from
+none of `0x12`/`0x1f`/`0x20`/`0x21` to three of the four present (`0x20`, IMS Application,
+still absent). Two NV bytes and a version bump; no carrier impersonation anywhere.
+
+That is the barrier crossed. ofono still reports `Registered: false`, which is now a
+question about IMS registration on BSNL rather than about whether the modem has an IMS
+stack at all.
+
+**It survives a reboot.** `init.qcom.sh` wipes `/data/vendor/radio/modem_config` on every
+boot as always, and the IMS services are still published on a cold start — the activated
+config lives in the modem's own store, not on disk. The staged files are only the source.
+A master copy now sits in `/data/vendor/radio/mbn-master/`, which `init.qcom.sh` does not
+touch, so a re-stage does not need the host.
+
+### Where it stops now: no IMS data profile
+
+With the services up, requests reach the modem and come back with real answers instead of
+timing out. `ofono`'s `IpMultimediaSystem.Register()` now produces:
+
+```
+qcril_qmi_imss_set_qipcall_config_resp_hdlr:  ril_err: 40, qmi res: 54
+qcril_qmi_imss_set_reg_mgr_config_resp_hdlr:  ril_err: 40, qmi res: 54
+qcril_qmi_imss_set_reg_mgr_config_resp_hdlr:  .. Need to change voice domain pref? No
+qcril_qmi_imss_set_reg_mgr_config_resp_hdlr:  .. Failed to change IMS state and remains in state 2
+qcril_qmi_imsa_is_ims_registered_for_voip_vt_service: IMS registered valid 1, Status 0
+```
+
+`ril_err 40` is `RIL_E_MODEM_ERR` (checked against `hardware/ril/include/telephony/ril.h`,
+not from memory — it is *not* `NO_RESOURCES`, which is 42): the modem answered and the
+answer was a refusal. Two things in there are new and good: "Need to change voice domain
+pref? **No**" means our `voice_domain_pref = 3` is already in effect, and `IMS registered
+**valid 1**, Status 0` means IMSA is now returning real data — previously every field came
+back `valid 0`, i.e. nothing at all. The modem's IMS stack is running and telling us,
+truthfully, that it is not registered.
+
+The most likely reason is the next gap in the same config. `rjil.mbn` carries
+`data/ds_dsd_attach_profile.txt` and `Data_Profiles/Profile1..3`; `row.mbn` carries
+**none**. Without a data profile for the IMS APN the modem cannot bring up the IMS PDN, so
+there is no bearer to do P-CSCF discovery or SIP registration over, and the registration
+manager has nothing to work with. Adding an IMS data profile to the patched config is the
+next experiment, and it is a larger edit than flipping two bytes — new items rather than
+changed values.
+
+Also still absent: QMI service `0x20` (IMS Application). Whether that appears once an IMS
+PDN exists, or is a separate problem, is not yet known.
+
 ### What the wider community reports about BSNL VoLTE
 
 The porters archive has nothing, but the Android modding and carrier forums have a great deal,
@@ -448,6 +535,13 @@ for test-key ELF signing if a device ever does check signatures.
   ordered before `rild`, not a one-off copy.
 - qcril skips reloading when `persist.vendor.radio.sw_mbn_loaded` is 1 — set it to 0 to force
   re-evaluation, then restart `rild` (`setprop ctl.restart ril-daemon`).
+- `persist.vendor.radio.sw_mbn_volte` and `persist.vendor.radio.sw_mbn_openmkt` must both be
+  `1` or no config is ever selected. They ship empty.
+- The first reload after an `rild` restart always cancels itself with "sw mbn init need to
+  cancel due to iccid_0 change" — the SIM-info cache is cold. Run it twice, or ignore the
+  first pass; only the second one gets past `load_to_db`.
+- A config edit that does not bump the MCFG version is ignored: qcril compares versions
+  against the active config and skips the reload. This fails silently.
 - Do **not** delete `/data/vendor/radio/qcril.db` to force a reload; it is the wrong lever and
   it breaks the load with `db add sw mbn file failed` until the database is restored.
 - Repeated `rild` restarts leave `ofono` dead (`systemctl restart ofono` recovers it), so check
@@ -459,13 +553,21 @@ enabled IMS (2025-09-01). Nothing on the Sailfish side can substitute for it.
 
 ### Device state
 
-The test device carries two changes that survive reboot and are **not** in any package:
+The test device carries these changes, which survive reboot and are **not** in any package:
 
-- `persist.vendor.radio.sw_mbn_update=1`
-- `/data/vendor/radio/modem_config/mcfg_sw/` populated with the eight `.mbn` files
+- `persist.vendor.radio.sw_mbn_update=1`, `sw_mbn_volte=1`, `sw_mbn_openmkt=1`
+- `/data/vendor/radio/mbn-master/` — the eight `.mbn` files, with `row.mbn` replaced by the
+  IMS-enabled build (MCFG minor 51). `init.qcom.sh` does not touch this directory.
+- The modem itself has that config **loaded, selected and activated**, and keeps it across
+  reboots independently of the files on disk.
 
-Both are safe to keep — they repair a vendor script that cannot work as written — but a
-freshly flashed device will not have them.
+They are safe to keep — they repair a vendor script that cannot work as written — but a
+freshly flashed device will not have them, and `/data/vendor/radio/modem_config/mcfg_sw/`
+is empty after every boot by design.
+
+`voice_domain_pref` is now `ImsPsVoicePreferred` rather than `CsVoiceOnly`. CS remains the
+fallback, so calls should behave exactly as before, but this is the one change with any
+chance of affecting ordinary calling and it has not yet been exercised with a real call.
 
 One operational note: reinstalling the plugin RPM **restarts** ofono. On one occasion the old
 process took a SEGV during that restart instead of exiting cleanly; it was not reproducible on
