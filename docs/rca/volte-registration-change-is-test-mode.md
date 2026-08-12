@@ -1054,6 +1054,38 @@ the NV item behind client provisioning and set it through the carrier config, th
 `IMS_enable` and `qipcall_config_items` were — which is a route this port has already proven
 it can take.
 
+**The instrumentation problem has a one-flag answer.** `logcat --regex <expr> -m <count>`
+filters *inside* logcat and exits on its own, so it cannot be outrun the way a piped `grep`
+is, and it does not care that the buffer holds seventeen seconds. Every capture failure
+below was avoidable:
+
+```sh
+logcat -b radio --regex "client_prov_enabled" -m 4 > out.log &
+```
+
+With that, the measurement finally works, and it is unambiguous:
+
+```
+BEFORE  RIL[0][main]  get_client_provisioning_config: client_prov_enabled_valid: 1, client_prov_enabled: 0
+        RIL[0][event] client_provisioning_config_ind_hdlr: client_prov_enabled_valid: 1, client_prov_enabled: 0
+                 ... ofono restart, setConfig(VLT_SETTING_ENABLED) sent and "accepted" ...
+AFTER   RIL[0][main]  get_client_provisioning_config: client_prov_enabled_valid: 1, client_prov_enabled: 0
+```
+
+**The value does not move.** Our `setConfig` does not change the modem's IMS client
+provisioning, whatever the HAL returns. That is the first hard confirmation that the ofono
+route, as currently used, does not do the thing it appears to do — and it retires the last
+theory that could be tested from the ofono side.
+
+Note also `client_provisioning_config_ind_hdlr`: the modem *pushes* provisioning state as an
+indication, and that too reads 0. So this is the modem's settled view, not a stale query.
+
+One more trap worth recording, because it silently invalidated several runs above: **ofono
+calls `set_registration` only when it decides the desired state changed.** Restarting ofono
+does not reliably fire it, and `IpMultimediaSystem.Register()` can return success having
+done nothing. Any test that depends on the plugin sending something must verify ofono
+actually logged `Setting config item` in the same window, or it is measuring nothing.
+
 **Reading it a second time proved harder than reading it once.** Five attempts to re-capture
 `client_prov_enabled` after a `setConfig` all failed, in three distinct ways, and the reason
 matters for anyone repeating this:
