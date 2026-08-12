@@ -1723,6 +1723,124 @@ ink coverage**, painted white on black — preserving the anti-aliasing. Scaling
 
 ---
 
+## Cellular — voice calls, SMS, USSD
+
+Verified on hardware **2026-08-13** on the live BSNL SIM (MCC 404 / MNC 80) in slot 1. Everything
+below rests on journal or `dmesg` evidence captured during the events, not on the UI looking right.
+
+### There is no VoLTE, so voice is CSFB — and it works
+
+The modem falls back from LTE to GSM to carry the call, and returns to LTE afterwards. Captured
+live during an outgoing call:
+
+```
+01:54:42  binder_voicecall_dial() slot1 +91XXXXXXXXXX
+01:54:43  ofono_netreg_status_notify() /ril_0 status 1 tech 7   <- EUTRAN (LTE)
+01:54:45  ofono_netreg_status_notify() /ril_0 status 1 tech 0   <- GSM: the fallback
+01:54:46  voicecall status: active (0)                          <- call connects on 2G
+```
+
+ofono's `tech` values are `ofono_access_technology`: **0 = GSM, 2 = UTRAN, 3 = GSM+EGPRS,
+7 = EUTRAN**. `status` is **1 = registered**, 2 = searching, 0 = not registered. A live D-Bus poll
+during the call agreed: `NetworkRegistration.Technology = "gsm"`.
+
+The full call state machine is clean — `dialing(2) → alerting(3) → active(0)` — with the call
+object at `/ril_0/voicecall01`, and a clean `ofono_voicecall_disconnected() reason: 1`
+(= local hangup) on teardown.
+
+**DTMF works.** Pressing a key mid-call produces
+`binder_voicecall_send_dtmf() slot1 queue '5'` → `binder_voicecall_send_one_dtmf() slot1 '5'`.
+
+### In-call audio routes correctly, but the DSP rejects the calibration
+
+PulseAudio does the right thing: the droid card switches to the `voicecall` profile, the sink
+takes `output-earpiece` and the source `input-voice_call`. A **mid-call** port change to
+`output-speaker` is accepted with no error and no `ENOSYS` — worth noting explicitly, because
+this HAL has no `create_audio_patch` (see *Audio* above) and that was the predicted failure.
+It does not bite here, because the profile switch happens before the streams open.
+
+What *is* broken is underneath: the ADSP rejects the voice device config and every volume step,
+which is why `org.ofono.CallVolume` reads `SpeakerVolume 0 / MicrophoneVolume 0 / Muted true` on
+a live, audible call. This is a known unresolved problem on 64-bit ports generally, not a karatep
+bug → [rca](rca/voice-call-dsp-calibration.md).
+
+> Audibility itself is **not yet verified**. It sounded fine in use, but no controlled test has
+> been run, so do not record it as working.
+
+### SMS works in both directions
+
+Full round trip, with the network ack going back so the message is not redelivered:
+
+```
+send:  sms.c:tx_queue_entry_new() -> binder_sms_send() -> sendSms -> sendSmsResponse
+       -> binder_sms_submit_cb() sms msg ref: 6 -> tx_finished()
+recv:  newSms -> binder_sms_incoming() -> ofono_sms_deliver_notify() -> handle_deliver()
+       -> sms_dispatch() -> binder_sms_ack() slot1 ok -> acknowledgeLastIncomingGsmSms
+```
+
+**Do not chase `binder_sms_submit_cb() ... ack: err: -1`.** That `-1` is the `errorCode` field of
+the RIL's `SendSmsResult`, defined as -1 when not applicable. Together with a valid message
+reference and a clean `tx_finished()` it means success.
+
+The SMSC is read from the SIM (`MessageManager.ServiceCenterAddress`), so nothing needs
+provisioning by hand.
+
+### USSD works
+
+`org.ofono.SupplementaryServices` round-trips against the live network:
+
+```sh
+dbus-send --system --print-reply --reply-timeout=30000 --dest=org.ofono /ril_0 \
+    org.ofono.SupplementaryServices.Initiate string:'*123#'
+```
+
+An **invalid** code for the operator comes back as `org.ofono.Error.Failed`, which looks like a
+broken SS path but is not — try a code the operator actually serves before concluding anything.
+
+### NITZ never arrives
+
+`org.ofono.NetworkTime.GetNetworkTime` returns an **empty array**. The network has never
+delivered a time or time-zone update, so automatic time zone does not work. This is invisible in
+daily use only because NTP keeps the clock correct over WiFi or mobile data. Not investigated.
+
+### Emergency numbers are the generic fallback
+
+`VoiceCallManager.EmergencyNumbers` lists only `911, 112` — not India's `100/101/102/108`. The
+SIM's ECC list is not reaching ofono. Note that `droid-hal-init` does process
+`ril.ecclist` from `/usr/libexec/droid-hybris/system/etc/init/ecclist.rc` at call time, so the
+plumbing is partly there. Untested and unfixed; **do not rely on emergency calling on this port.**
+
+### Reading the logs while the VoLTE work is running
+
+With the VoLTE investigation's ofono debug logging enabled, `ofonod` writes ~99% of all journal
+lines (measured: 94 966 of 95 716 in ten minutes), which rotates the 300 MB journal in about half
+an hour. Post-hoc verification of anything is impossible in that state — capture during the event,
+and filter the binder hexdumps out:
+
+```sh
+journalctl --since "10 min ago" -o short-iso \
+  | grep -viE "ofonod\[[0-9]+\]: +[0-9a-f]{2,6}: ([0-9a-f]{2} )+"
+```
+
+### A dropped call is not necessarily a port bug
+
+A call dropped mid-session and looked like a radio fault. It was not — the RIL had been restarted
+out from under it:
+
+```
+01:57:35  [gbinder-radio] WARNING! /dev/hwbinder:slot1:1:-1 died
+01:57:35  slot1 binder service died
+dmesg:    droid-hal-init: Processed ctl.restart for 'ril-daemon' from pid: N
+                          (setprop ctl.restart ril-daemon)
+```
+
+Signal was −57 to −65 dBm on GSM at the time, i.e. excellent. Before blaming coverage, check
+`dmesg` for `ctl.restart ril-daemon` and the journal for `binder service died`. Also note that
+post-restart signal readings of **−140 dBm (1%)** are the RIL's "unknown" sentinel, not a real
+measurement.
+
+---
+
 ## Known-good workarounds (not yet root-caused)
 
 * **`ofono` sometimes needs `systemctl restart ofono` after boot** for RIL to come up.
