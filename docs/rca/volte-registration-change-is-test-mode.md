@@ -598,26 +598,79 @@ non-`qipcall` set; with all 46 it reads `radiotech:15` (LTE) and `Register()` su
 the minimum for "VoLTE is permitted" is one item; the minimum for "the whole path works" is
 larger and has not been bisected. The device is left carrying all 46.
 
-### Still not registering
+### The network is not the problem
 
-Even with everything above accepted, IMS does not register. After three minutes:
+The SIM is BSNL **Tamil Nadu**. Before it went into this device it was in another handset
+that does VoLTE, at the same location, and it registered immediately and placed calls. So
+BSNL is providing IMS to this subscriber, on this cell, right now. Every remaining
+hypothesis has to be a handset-side one.
+
+That also matches what BSNL users report and what a widely circulated
+[r/bsnl thread](https://www.reddit.com/r/bsnl/comments/1v9rfn4/how_to_activate_volte/)
+describes: BSNL had no 4G for the best part of a decade, so shipped carrier configs do not
+identify it as a VoLTE carrier, Android's telephony framework hides the VoLTE switch as a
+result, and the provisioning value behind that switch is never written. On Xiaomi builds
+the `*#*#86583#*#*` dialer code forces the switch open and registration follows within
+seconds. Customer care and a BSNL office had both failed to "activate" anything, because
+there was nothing on the network side to activate.
+
+### The provisioning half: setConfig
+
+That is a lever we did not have. `setServiceStatus` tells the modem which IMS services to
+run; nothing was telling it the subscriber is allowed to run them. Recovering the interface
+from `ims.apk` again:
+
+```
+setConfig            transaction 12, response 9,  setConfig(int32 token, ConfigInfo)
+ConfigInfo           40 bytes: item@0, hasBoolValue@4, boolValue@5, intValue@8,
+                     stringValue@16, errorCause@32
+CONFIG_ITEM_VLT_SETTING_ENABLED        = 11
+CONFIG_ITEM_MOBILE_DATA_ENABLED        = 26
+CONFIG_ITEM_VOLTE_USER_OPT_IN_STATUS   = 33
+ConfigFailureCause   0 NO_ERR, 1 IMS_NOT_READY, 2 FILE_NOT_AVAILABLE,
+                     3 READ_FAILED, 4 WRITE_FAILED, 5 OTHER_INTERNAL_ERR
+```
+
+Implemented in the fork, and it took two corrections:
+
+- **qcril picks the value slot per item, not from `hasBoolValue`.** The first build sent the
+  value only in `boolValue` and qcril logged `Set config PRESENCE
+  volte_user_opted_in_status to: 0` — request delivered, wrong value. It reads `intValue`
+  and logs `type: 0` for these items. Filling both slots fixes it, and the log then reads
+  `to: 1`.
+- **`VOLTE_USER_OPT_IN_STATUS` (33) goes to qcril's *presence* config handler**, and that
+  write returns `ConfigFailureCause 4` = `CONFIG_WRITE_FAILED` on this modem however
+  correct the request is. `VLT_SETTING_ENABLED` (11) routes through the IMS settings
+  service instead and is **accepted**. Both are sent; 11 succeeds, 33 fails.
+
+So the current state of the device is: IMS enabled in NV, voice domain IMS-preferred, the
+IMS parameter set present, an IMS data profile present, `VLT_SETTING_ENABLED = 1` accepted,
+the VoLTE service status accepted — and every request the stack makes now returns success.
+
+### Still not registering
 
 ```
 QtiRadioRegInfo state:1 radiotech:15 error_code:0     (NOT_REGISTERED, LTE, no error)
 qcril_data_process_qmi_dsd_ind: pdn[0] name=bsnlnet
 ```
 
-Still one PDN, no `rmnet_data*` addresses, no IMS PDN, and `error_code: 0` — the modem is
-not reporting a failure, it simply never starts. The remaining candidates, in the order
-worth testing:
+One PDN, no `rmnet_data*` addresses, no IMS PDN, `error_code: 0`, unchanged across a
+reboot. Nothing refuses anything any more; the modem simply never starts a registration.
 
-1. **BSNL is not actually providing IMS to this subscriber on this cell.** `ACTVOLTE` was
-   sent to 53733 the night before this run, but nothing confirms provisioning took effect,
-   and BSNL's VoLTE is a 2024–25 rollout that is circle-by-circle. This is the cheapest
-   thing left to establish and it invalidates everything below if true.
-2. The attach profile: `rjil.mbn` carries `data/ds_dsd_attach_profile.txt`
-   (`Attach_Profile_ID:1`) and the patched config does not.
-3. QMI service `0x20` (IMS Application) has never appeared, at any point in any of this.
+Open threads, in the order worth pulling:
+
+1. **The IMS PDN.** Nothing ever requests one. `rjil.mbn` carries
+   `data/ds_dsd_attach_profile.txt` (`Attach_Profile_ID:1`) and `Data_Profiles/Profile1`
+   (the default profile, no APN) alongside its `Profile2`; the patched config has only
+   `Profile2`. Whether the modem needs the full trio, or needs the IMS APN reachable at LTE
+   attach, is untested.
+2. **The missing QMI service.** `0x20` has never appeared, at any point, under any config.
+   qcril's presence write failing is consistent with the presence service being the absent
+   one, but that identification is not proven and should be established rather than assumed.
+3. **The one item we cannot set.** If `VOLTE_USER_OPT_IN_STATUS` is genuinely the flag the
+   Xiaomi code writes, then this modem refusing that write may be the whole remaining story
+   — and the fix would be to set the underlying NV item through the carrier config instead
+   of over QMI, the same way `IMS_enable` and `qipcall_config_items` were.
 
 ### What the wider community reports about BSNL VoLTE
 
