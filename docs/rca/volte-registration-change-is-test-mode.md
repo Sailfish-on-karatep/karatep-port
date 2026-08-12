@@ -692,7 +692,54 @@ have never sent. Also unexplored and in the same neighbourhood:
 So the modem has been told, in this document's own words, "everything" — except the one
 thing the working handset actually says to it.
 
-### The Reliance config property is probably stale — treat the previous section with care
+### The reference firmware settles it: no carrier config matches BSNL, in 2017 or 2024
+
+The reference handset's fastboot ROM (`alioth_in_global`, `OS1.0.2.0.TKHINXM`, June 2024)
+carries `images/NON-HLOS.bin` — a FAT16 modem filesystem, extractable with `mtools`, no root
+needed — holding **266** software carrier configs under
+`image/modem_pr/mcfg/configs/mcfg_sw/`. Parsing every one of their `MCFG_TRL` trailers with
+the same `mbn-tool` used throughout:
+
+| config | MCC 404 coverage |
+|---|---|
+| `Commercial-Airtel` | 404/2, 3, 10, 16, 31, 40, 45, 49, 70, 90, 92, 93, 94, 95, 96, 97, 98 |
+| `IDEA_Commercial` | 404/4, 7, 12, 14, 19, 22, 24, 44, 56, 78, 82, 87, 89 |
+| `Commercial-Vodafone` (India) | 404/1, 5, 11, 13, 15, 20, 27, 30, 43, 46, 60, 84, 86, 88 |
+| `Commercial-Reliance` | **none** — MCC 405 only, plus Jio's `89918xx` IINs |
+
+**MNC 80 appears in none of them.** A 2024 Qualcomm config set, from a phone on which BSNL
+VoLTE demonstrably works, still has no configuration for BSNL. The finding this document
+made early on — "there is no MCC 404 entry anywhere" — was right, and stays right seven
+years later.
+
+Two things follow immediately.
+
+**The `Commercial-Reliance` property is stale, conclusively.** That config matches MCC 405
+and Jio ICCID prefixes; it cannot be selected for a BSNL SIM by any matching rule. So it
+dates from a Jio card in that phone's slot 0, exactly as suspected. The relabelling plan
+built on it is dead, and it should never have been proposed on that evidence.
+
+**BSNL falls through to the generic config there too** — same wildcard IIN `8949024`, the
+same slot our `ROW_Generic_3GPP` occupies. And that is where the real difference lives:
+
+| | our 2017 `row.mbn` | their 2024 `ROW_Commercial` |
+|---|---|---|
+| `ims/IMS_enable` | **0** | **1** |
+| `modem/mmode/voice_domain_pref` | **CsVoiceOnly** | **ImsPsVoicePreferred** |
+| total items | 4 | 74 |
+
+Qualcomm turned IMS on in the generic fall-through config somewhere between the two, and
+populated it. The two-byte patch built here by hand reproduces exactly what they later
+shipped, which is about as good a validation of the approach as could be hoped for.
+
+The 74-item reference is not directly transplantable — the newer modem uses a different NV
+item generation (`RegistrationConfiguration`, `IMSVoiceDynamicConfig`,
+`qp_ims_service_enablement_config`, `ims_sip_config`, `ims_user_agent`) where ours uses the
+`qp_ims_*` / `qipcall_*` family. But three of its items map onto gaps already identified
+here and are worth trying: `data/ds_dsd_attach_profile.txt`, and `Data_Profiles/Profile1`
+and `Profile3`, where the patched config carries only `Profile2`.
+
+### The Reliance config property is stale — see above
 
 The decisive evidence came from putting the BSNL SIM into a handset where its VoLTE works —
 a Xiaomi `aliothin` (M2012K11AI, Snapdragon 870), stock, unrooted — and reading its state
