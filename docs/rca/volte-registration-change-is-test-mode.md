@@ -680,12 +680,24 @@ to. And one line fails:
 qcril_data_set_apn_types: Failed to set apn type rc [0] result [1] error [57]
 ```
 
-qcril cannot tag the call with its APN types. A PDN that is not tagged as the IMS APN type
-is plausibly not a PDN the modem's IMS stack will bind to, which would make this bearer
-useless to it however correct the APN string is. That points at
-`ofono-binder-plugin` rather than the carrier config: the radio HAL's `DataProfileInfo`
-carries `supportedApnTypesBitmap`, and if ofono does not set it for the IMS context there
-is nothing for qcril to tag with. **This is the most promising open lead.**
+qcril cannot tag the call with its APN types.
+
+**That is not ofono's fault, and the obvious fix would have been wasted work.** Reading
+`ofono-binder-plugin` 1.1.25, which is what is installed: `binder_data_call_setup` maps
+`OFONO_GPRS_CONTEXT_TYPE_IMS` to `RADIO_DATA_PROFILE_IMS`, and every `setupDataCall`
+variant including the sub-1.4 HIDL one this device uses sends both
+`dp->profileId = setup->profile_id` and
+`dp->supportedApnTypesBitmap = binder_radio_apn_types_for_profile(...)`, which sets
+`RADIO_APN_TYPE_IMS` for that profile id. The whole path is gated on `use_data_profiles`,
+whose default is `TRUE` (`BINDER_DEFAULT_SLOT_USE_DATA_PROFILES`) and which `binder.conf`
+does not override. So the IMS profile id and the IMS APN type bit are both on the wire
+already, and qcril's own log agrees — it looks up and finds `3gpp profile id [2]`, our
+imported `Profile2`.
+
+`qcril_data_set_apn_types` is qcril talking to the modem over dsi_netctrl *after* that
+lookup has already succeeded, and the call completes regardless. So this is a
+qcril-to-modem limitation on 2017 MSM8937 firmware, logged at error level and apparently
+survivable, not a missing field from our side. Do not fork `ofono-binder-plugin` for it.
 
 ### RegOnMode: the imported config registers only on a call
 
@@ -700,21 +712,53 @@ always-registered stack and a VoLTE indicator need. Verified in the packed file.
 **not** by itself produce a registration, with or without the IMS bearer up, so it is a
 correctness fix rather than the answer.
 
+### qcril's QMI LTE client times out at every start
+
+Watching a full `rild` start rather than the IMS path alone turns up something that was
+never visible before:
+
+```
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned (-3) for LTE
+qcril_qmi_init_core_client_handles: qmi_client_init_instance returned failure((-3) QMI_TIMEOUT_ERR) for QMI LTE
+```
+
+Every other core client — VOICE, DMS, NAS, PBM, RF SAR, WMS, RFRPE — returns 0. This one
+times out, on every start, and it has presumably been doing so since the port began. Its
+relevance to IMS is unproven and it may be unrelated, but it is a real init failure in the
+telephony stack that nothing else has accounted for, and it is worth understanding before
+guessing further.
+
+For the record, the complete QMI service list the modem publishes in this state:
+
+```
+01 02 03 04 05 07 08 09 0a 0b 0c 0e 0f 10 11 12 16 17 18 1a 1c 1d 1f 21 22 24 28 29 2a 2b
+2e 2f 30 33 34 35 36 37  100 104 105 107 108 10d 10f 111 112 113 114 115 117 118 119 11b
+11f 125 128 129 12a 12b 12c 12e 12f 131  301 302 303  1000 1001
+```
+
+`0x20` is absent and has been absent under every configuration tried.
+
 ### Open threads
 
-1. **`supportedApnTypesBitmap` on the IMS context** — see above. Check what
-   `ofono-binder-plugin` puts in `DataProfileInfo` for a `Type: ims` context, and whether
-   `qcril_data_set_apn_types` stops failing when it is set.
-2. **ofono never activates the IMS context on its own.** Even once that is fixed, something
-   has to bring the context up when IMS registration is wanted; right now it only happens
-   by hand over D-Bus.
-3. **The missing QMI service.** `0x20` has never appeared, at any point, under any config.
-   qcril's presence write failing is consistent with the presence service being the absent
-   one, but that identification is not proven and should be established rather than assumed.
-4. **The one item we cannot set.** If `VOLTE_USER_OPT_IN_STATUS` is genuinely the flag the
+1. **The missing QMI service `0x20`.** It has never appeared, at any point, under any
+   config. qcril's presence write failing is consistent with the presence service being the
+   absent one, but that identification is **not proven** — establish what `0x20` actually is
+   from the firmware rather than assuming it from a table.
+2. **The QMI LTE client timeout**, above.
+3. **The one item we cannot set.** If `VOLTE_USER_OPT_IN_STATUS` is genuinely the flag the
    Xiaomi code writes, then this modem refusing that write may be the whole remaining story
    — and the fix would be to set the underlying NV item through the carrier config instead
    of over QMI, the same way `IMS_enable` and `qipcall_config_items` were.
+4. **ofono never activates the IMS context on its own.** Whether that matters depends on
+   whether this modem's IMS stack wants an AP-established bearer at all; on modem-side IMS
+   it normally brings up its own. Worth settling before building anything.
+
+### Housekeeping noticed on the way
+
+`/etc/ofono/ril_subscription.conf` is still on the device and still sets
+`useDataProfiles=true`. It is dead: that file belonged to the grilio RIL plugin this port
+migrated off, and `ofono-binder-plugin` reads `binder.conf` and `binder.d/`. Harmless, but
+misleading to anyone reading the device's configuration.
 
 ### What the wider community reports about BSNL VoLTE
 
