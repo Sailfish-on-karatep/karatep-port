@@ -977,6 +977,44 @@ disproved. The radio buffer is extremely chatty and rotates fast; catching it ne
 capture armed before the request and correlated against ofono's own log in the same window,
 which has not yet been done cleanly.
 
+### "setConfig accepted" does not mean the modem heard anything
+
+A correlated capture — 16 MB radio buffer, unfiltered, armed before the request, with
+ofono's journal for the same window — shows the problem with every success reported above:
+
+```
+ofono   16:24:00.569  ims:Setting config item 11 to 1
+ofono   16:24:00.569  imsradio0< [00000007] 12 setConfig
+ofono   16:24:00.589  imsradio0> [00000007] 9 setConfig
+ofono   16:24:00.589  ims:imsradio0 setConfig accepted
+radio   16:24:00        (nothing -- zero RILQ lines at that second)
+```
+
+9,881 RILQ lines in the window, none of them at the moment of the call, and no
+`map_ims_config_to_radio_config_item`, no handler line, no `service_enable`. Repeated with
+`rild` restarted first and three separate rounds of items 11 and 26: same result every time.
+
+The `Mapped ims config: 11 to radio config: 23` lines quoted earlier in this document are
+real, but they come from **one** run, on 08-12 at 08:33. No capture since has reproduced
+them, including for item 11, which is unchanged. So somewhere between then and now the
+requests stopped reaching qcril's radio-config layer, while the HAL kept answering them
+within 20 ms with success.
+
+That is a serious problem for everything built on top. **`setConfig accepted` and
+`IMS voice service enabled` are not evidence that the modem received or acted on anything**
+— they are evidence that `ImsRadioImpl` inside `rild` returned a result. The same doubt
+applies to `setServiceStatus` being "accepted" and, by extension, to the conclusion that
+importing `qipcall_config_items` made the modem "accept IMS". That bisect measured a change
+in what the HAL returned; whether it measured a change in the modem is now open.
+
+Nothing above needs retracting on the *carrier config* side — `IMS_enable`, the MBN load,
+select and activate all have qcril's own log lines and are independently confirmed by
+`dump_servers` changing. But every conclusion resting only on a HIDL return code should be
+treated as unverified until it can be seen from qcril's side or from QMI directly.
+
+This is the strongest argument yet for reading `imsa`/`imss` over QMI rather than inferring
+from the HAL boundary.
+
 ### Open threads
 
 Every QMI service the VoLTE voice path needs is present, every setting is accepted, a
