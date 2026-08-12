@@ -324,10 +324,31 @@ outright:
 | `row.mbn` | IIN `wild` — **no MCC/MNC rows at all** | — |
 
 **There is no MCC 404 entry anywhere.** India's MCC is 404 for most operators (BSNL is 404/80);
-Jio is the exception at 405. So a BSNL SIM matches nothing, falls through to the `wild`
-catch-all `row.mbn`, and that config carries exactly one IMS NV item (`IMS_enable`) against
-`rjil.mbn`'s 49. The modem is told "IMS on" with no IMS configuration behind it and never
-brings the stack up. That is the whole failure, end to end.
+Jio is the exception at 405. So a BSNL SIM matches nothing and falls through to the `wild`
+catch-all `row.mbn`.
+
+### What `row.mbn` actually says: IMS off, CS-only voice
+
+Decoding the configs rather than reading their file sizes settles it. `row.mbn` contains
+**four** configuration items in total:
+
+| item | `row.mbn` | `rjil.mbn` |
+|---|---|---|
+| `nv/item_files/ims/IMS_enable` | **0** | 1 |
+| `nv/item_files/modem/mmode/voice_domain_pref` | **CsVoiceOnly (0)** | ImsPsVoicePreferred (3) |
+| `nv/item_files/modem/mmode/ue_usage_setting` | VoiceCentric (0) | VoiceCentric (0) |
+| `nv/item_files/modem/lte/rrc/cap/diff_fdd_tdd_fgi_enable` | 1 | 1 |
+| ~60 further `ims/qp_ims_*`, `qipcall_*`, IWLAN and data-profile items | — | present |
+
+Two bytes. Every SIM on this device that is not Jio gets a modem configured with IMS
+**disabled** and voice pinned to the circuit-switched domain. That is why the modem publishes
+no IMS QMI services (0x12 IMSA, 0x1f IMSS, 0x20 IMSP, 0x21 IMS VT) for qcril's clients to bind
+to, which is why every IMSS request times out, which is why `setServiceStatus` cannot enable
+anything. The chain is complete from the two NV bytes up to ofono.
+
+An earlier revision of this document said `row.mbn` "carries exactly one IMS NV item
+(`IMS_enable`)" and inferred the modem was told *IMS on* with nothing behind it. That was
+wrong, and it pointed at the wrong fix — the item is present and set to **0**.
 
 Forcing `rjil.mbn` by staging it alone does **not** work: the configs are loaded into the
 *modem*, not just qcril, and the modem does the matching. With a BSNL SIM it will not select a
@@ -349,16 +370,76 @@ The carrier metadata is equally accessible: in `rjil.mbn` the `MCFG_TRL` trailer
 0x7520 and the MCC/MNC pairs are plain adjacent little-endian 16-bit values (405 at 0x75ba,
 840 at 0x75bc). So editing a config's carrier match and rehashing it is straightforward.
 
-Two routes follow, and they are not equivalent:
+This is independently confirmed by SBA Research, whose `mbn-mcfg-tools` states plainly that
+"the modems we tested with only checked the hashes in the secure boot header and ignored
+wrong/missing signatures for MBN MCFG files". That tool parses and repacks these files, and it
+round-trips ours **byte-for-byte identically** (`row.mbn` unpacked and repacked is the same
+SHA-256), which is as strong a validation of both the tool and the format as is available.
 
-1. **Relabel `rjil.mbn` to match 404/80.** Cheap and local. Brings Jio's 49 IMS items — but
-   also Jio's APN and VoWiFi settings (`epdg_fqdn:vowifi.jio.com`), which are wrong for BSNL.
-   Good enough to *prove* the mechanism; questionable as a shipped configuration.
-2. **Source a config that genuinely covers MCC 404.** Any Indian-market MSM8937/8953 firmware
-   is likely to carry one. Note also that the config this modem ran under stock was
-   `OTA_..row.mbn1574430761` — a 2019 OTA-updated `row.mbn`, newer than the 2017 file on the
-   firmware partition and lost with the data wipe. If VoLTE worked on Android here, that file
-   is the most likely reason and the best thing to hunt for.
+Its decode of the `MCFG_TRL` trailer is also what produced the table above without going
+through `qcril.db`: `rjil.mbn` is `Commercial-Reliance`, MCC 405 / MNC 840–874, ICCID prefixes
+8991840…; `row.mbn` is `ROW_Generic_3GPP` with an **empty** MNO-id list and a wildcard flag.
+
+### The fix: patch `row.mbn`, do not impersonate a carrier
+
+Because the failing item is a value inside the config the modem *already selects* for this SIM,
+there is no need to relabel a foreign carrier's config or forge an MCC/MNC match. Flipping the
+two bytes in `row.mbn` is sufficient and is the honest change: the generic 3GPP config keeps its
+correct APNs and its correct carrier scope, and only stops asserting that IMS is off.
+
+```
+IMS_enable        0 -> 1
+voice_domain_pref 0 (CsVoiceOnly) -> 3 (ImsPsVoicePreferred)
+```
+
+`voice_domain_pref = 3` is the safe value: IMS is preferred, CS remains the fallback, so a
+failure to register on IMS costs nothing. The patched file is the same 8564 bytes, its hashes
+recompute correctly, and it re-extracts with the intended values.
+
+Two things this does **not** do, and they are the open risks:
+
+- `row.mbn` has none of the ~60 `qp_ims_*` tuning items `rjil.mbn` carries, so the modem falls
+  back to firmware defaults for P-CSCF discovery, codecs and registration timers. Enabling IMS
+  may therefore bring the QMI services up without the stack completing registration on BSNL.
+  Bringing 0x12/0x1f/0x20/0x21 up in `dump_servers` is the checkpoint that says the barrier is
+  crossed; registration is the next question, not the same one.
+- BSNL requires VoLTE to be **provisioned on the account** (`ACTVOLTE` to 53733). This is
+  widely reported and costs nothing to confirm, and no amount of modem configuration
+  substitutes for it.
+
+The alternative — sourcing a config that genuinely covers MCC 404 — is worth keeping in
+reserve but is unlikely to be found for this SoC: BSNL's 4G, and with it BSNL VoLTE, only
+launched in 2024–2025, whereas the newest config on this device is from 2017. No MSM8937-era
+firmware can contain a BSNL VoLTE profile, because BSNL had no VoLTE when it was written. Note
+also that the config this modem ran under stock was `OTA_..row.mbn1574430761` — a 2019
+OTA-updated `row.mbn`, newer than the 2017 file on the firmware partition and lost with the
+data wipe. It is still the most interesting artefact to hunt for, but on the same timeline it
+would predate BSNL VoLTE too.
+
+### What the wider community reports about BSNL VoLTE
+
+The porters archive has nothing, but the Android modding and carrier forums have a great deal,
+and it corroborates the diagnosis rather than complicating it:
+
+- The standard remedy for "VoLTE works on stock, not on my custom ROM" is exactly this: obtain
+  an `mcfg_sw.mbn` for the carrier and load it, either by dropping it into
+  `/data/vendor/radio/modem_config` or by selecting it with Qualcomm's PDC tool via the
+  `*#*#663368378#*#*` modem-config activity. The mechanism we arrived at from first principles
+  is the one the community has been using for years.
+- For India specifically, the configs people pass around are Airtel, Vodafone/Idea and Jio —
+  `APAC/vodafone/commercial/india/mcfg_sw.mbn` is the usual recommendation. **No BSNL config
+  circulates**, which is consistent with BSNL having had no VoLTE to configure until 2024–25.
+- BSNL VoLTE fails on plenty of *stock* phones too — recurring reports against several Samsung
+  Galaxy models (S22 Ultra, S23, A23, M30s, M35) where the same SIM does VoLTE on Moto, Vivo and
+  Realme handsets. That pattern is a per-OEM carrier-config problem, not a network outage, and
+  it is the same class of bug as ours.
+- BSNL requires VoLTE to be provisioned per subscriber: SMS `ACTVOLTE` to 53733, or ask at a
+  BSNL office. Worth doing before drawing conclusions from any modem-side experiment.
+
+Public MBN corpora exist (`JohnBel/QualcommMBNs`) but are organised by donor handset and carry
+no MCC 404 profile. Tooling: `sbaresearch/mbn-mcfg-tools` (parse/pack/verify),
+`JohnBel/EfsTools` (modem EFS access), `Biktorgj/mcfg_tools`, and `msm8916-mainline/qtestsign`
+for test-key ELF signing if a device ever does check signatures.
 
 ### Operational notes for anyone continuing this
 

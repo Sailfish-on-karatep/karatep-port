@@ -18,7 +18,7 @@ README for the full explanation.
 |---|---|
 | `build-hal.sh`, `build-hybris-boot.sh`, `build-fpservice.sh`, `build-recoveryimage.sh`, `build-los-recovery.sh`, `waydroid/build-waydroid-hwc.sh` | **HABUILD SDK** |
 | `build-hal-packages.sh`, `build-image.sh`, `build-geoclue.sh`, `build-geoclue-inplace.sh`, `build-fpd-rpm.sh`, `build-extqti.sh`, `waydroid/build-waydroid-rpm.sh` | **PLATFORM SDK** |
-| `sfossdk`, `habuild`, `mb2`, `sdk-assistant`, `ircgrep.sh`, `sign-installer-zip.sh`, `stage-boot-img.sh`, `install-clean-updater.sh`, `flash.sh`, `make-bootsplash.py`, `devshell.py`, `hidl-from-apk.py` | **HOST** |
+| `sfossdk`, `habuild`, `mb2`, `sdk-assistant`, `ircgrep.sh`, `sign-installer-zip.sh`, `stage-boot-img.sh`, `install-clean-updater.sh`, `flash.sh`, `make-bootsplash.py`, `devshell.py`, `hidl-from-apk.py`, `patch-mbn-ims.sh` | **HOST** |
 
 `sfossdk`, `habuild`, `mb2` and `sdk-assistant` are thin wrappers whose only job
 is to force `PLATFORM_SDK_ROOT=/opencloud/SailfishOS`, so nothing resolves into
@@ -63,3 +63,15 @@ VoLTE work against `/system/system_ext/priv-app/ims/ims.apk`; see
 `docs/rca/volte-registration-change-is-test-mode.md`. Always sanity-check a
 `codes` run against transaction codes your existing client already hardcodes —
 if it reproduces those, the rest can be trusted.
+
+`patch-mbn-ims.sh` turns IMS on in a Qualcomm MBN modem configuration. On
+karatep every SIM that is not Jio falls through to the generic `row.mbn`
+(`ROW_Generic_3GPP`), which sets `IMS_enable = 0` and pins voice to the
+circuit-switched domain — so the modem never publishes its IMS QMI services and
+VoLTE cannot work at any layer above. The script flips those two NV items and
+repacks, using `sbaresearch/mbn-mcfg-tools`, which it fetches into
+`/opencloud/work/telephony` on first run. These files carry three SHA-256 hashes
+and no signature, and this modem checks only the hashes, so a repacked config is
+accepted; the tool round-trips karatep's own configs byte for byte. The script
+re-extracts what it wrote and asserts the values rather than trusting the edit.
+See `docs/rca/volte-registration-change-is-test-mode.md`.
