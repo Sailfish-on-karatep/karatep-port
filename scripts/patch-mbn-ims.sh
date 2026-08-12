@@ -16,14 +16,30 @@
 # only checks the hashes, so a repacked file is accepted. Repacking is done by
 # sbaresearch/mbn-mcfg-tools, which round-trips karatep's configs byte for byte.
 #
+# With --ims-profile it also copies a data profile in from a donor config, so
+# the modem has an IMS APN to bring a PDN up on. On karatep the donor is
+# rjil.mbn's Profile2, which is a plain "ims" APN with pdp_type IPv4v6 and
+# everything else zero -- nothing carrier-specific. Adding an item means adding
+# an entry to nv_items as well as a file under files/: the packer iterates
+# nv_items, so a file with no entry is silently dropped.
+#
 # See docs/rca/volte-registration-change-is-test-mode.md.
 #
-# Usage: patch-mbn-ims.sh <in.mbn> <out.mbn> [workdir]
+# Usage: patch-mbn-ims.sh [--ims-profile <donor.mbn>[:ProfileN]] \
+#                         <in.mbn> <out.mbn> [workdir]
 
 set -euo pipefail
 
-IN=${1:?usage: patch-mbn-ims.sh <in.mbn> <out.mbn> [workdir]}
-OUT=${2:?usage: patch-mbn-ims.sh <in.mbn> <out.mbn> [workdir]}
+USAGE='usage: patch-mbn-ims.sh [--ims-profile <donor.mbn>[:ProfileN]] <in.mbn> <out.mbn> [workdir]'
+
+DONOR=
+if [ "${1-}" = "--ims-profile" ]; then
+    DONOR=${2:?$USAGE}
+    shift 2
+fi
+
+IN=${1:?$USAGE}
+OUT=${2:?$USAGE}
 WORK=${3:-/opencloud/work/telephony}
 
 TOOLS="$WORK/mbn-mcfg-tools"
@@ -42,6 +58,36 @@ trap 'rm -rf "$DIR"' EXIT
 
 "$VENV/bin/mbn-tool" -c "$IN"
 "$VENV/bin/mbn-tool" -e "$IN" "$DIR/x"
+
+if [ -n "$DONOR" ]; then
+    DONOR_MBN=${DONOR%%:*}
+    DONOR_PROFILE=${DONOR#*:}
+    [ "$DONOR_PROFILE" = "$DONOR_MBN" ] && DONOR_PROFILE=Profile2
+    "$VENV/bin/mbn-tool" -e "$DONOR_MBN" "$DIR/donor" >/dev/null
+    python3 - "$DIR/x" "$DIR/donor" "$DONOR_PROFILE" <<'PY'
+import json, pathlib, shutil, sys
+root, donor, prof = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+
+src = donor / 'files' / 'Data_Profiles' / prof
+if not src.exists():
+    sys.exit(f'donor has no Data_Profiles/{prof}')
+dst = root / 'files' / 'Data_Profiles' / prof
+if dst.exists():
+    sys.exit(f'target already has Data_Profiles/{prof}; refusing to overwrite')
+dst.parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(src, dst)
+
+name = f'/Data_Profiles/{prof}\x00'
+items = json.loads((root / 'nv_items').read_text())
+items.append({
+    'type': 2, 'attributes': 25, 'reserved': 0,
+    'filename': {'hex': ' '.join(f'{b:02x}' for b in name.encode('latin-1')),
+                 'ascii': name, '__type__': 'bytes'},
+    'data_magic': 7, '__type__': 'MCFG_Item'})
+(root / 'nv_items').write_text(json.dumps(items, indent=2))
+print(f'added Data_Profiles/{prof} from {donor.name} ({len(items)} items total)')
+PY
+fi
 
 python3 - "$DIR/x" <<'PY'
 import json, pathlib, sys
@@ -64,6 +110,11 @@ for rel, val in (('nv/item_files/ims/IMS_enable', 1),
 # match -- so an edit that leaves the version alone is silently ignored. The
 # version is four bytes, [minor, carrier, oem, family], and appears three
 # times: meta.version and the trailer's version1/version2, which must agree.
+#
+# The bump is +1 relative to the INPUT file. If the modem already has a
+# patched config active, patching the pristine config again reproduces the
+# version already loaded and will be skipped -- feed it the previous output,
+# or bump again, so the version is strictly higher than what is active.
 meta = json.loads((root / 'meta').read_text())
 
 
@@ -113,5 +164,13 @@ for path in (('version',), ('trailer', 'version1'), ('trailer', 'version2')):
     assert g['hex'] == w['hex'], f'{path}: {g["hex"]} != {w["hex"]}'
     print(f'verified {".".join(path)} = {g["hex"]}')
 PY
+
+if [ -n "$DONOR" ]; then
+    DONOR_PROFILE=${DONOR#*:}
+    [ "$DONOR_PROFILE" = "${DONOR%%:*}" ] && DONOR_PROFILE=Profile2
+    cmp "$DIR/v/files/Data_Profiles/$DONOR_PROFILE" \
+        "$DIR/x/files/Data_Profiles/$DONOR_PROFILE"
+    echo "verified Data_Profiles/$DONOR_PROFILE survives the pack byte-identical"
+fi
 
 echo "wrote $OUT"

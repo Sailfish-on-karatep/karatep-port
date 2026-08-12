@@ -492,16 +492,78 @@ pref? **No**" means our `voice_domain_pref = 3` is already in effect, and `IMS r
 back `valid 0`, i.e. nothing at all. The modem's IMS stack is running and telling us,
 truthfully, that it is not registered.
 
-The most likely reason is the next gap in the same config. `rjil.mbn` carries
-`data/ds_dsd_attach_profile.txt` and `Data_Profiles/Profile1..3`; `row.mbn` carries
-**none**. Without a data profile for the IMS APN the modem cannot bring up the IMS PDN, so
-there is no bearer to do P-CSCF discovery or SIP registration over, and the registration
-manager has nothing to work with. Adding an IMS data profile to the patched config is the
-next experiment, and it is a larger edit than flipping two bytes — new items rather than
-changed values.
+### Adding an IMS data profile: necessary-looking, not sufficient
 
-Also still absent: QMI service `0x20` (IMS Application). Whether that appears once an IMS
-PDN exists, or is a separate problem, is not yet known.
+`rjil.mbn` carries `data/ds_dsd_attach_profile.txt` and `Data_Profiles/Profile1..3`;
+`row.mbn` carries **none**, so the obvious next suspect was that the modem had no IMS APN
+to bring a PDN up on.
+
+The `Data_Profiles/ProfileN` format decodes cleanly:
+
+```
+byte 0   0x07                     item-file prefix
+u16      version (1)
+u16      profile number
+u32      payload size
+u32      TLV count
+4B       magic a5 a5 a5 a5
+u32,u32  two unidentified values
+8B       zero
+         then TLVs: u16 id, u16 length, value
+```
+
+Jio's `Profile2` is the IMS one and contains nothing Jio-specific: APN `ims` (id 0x1001),
+pdp_type 3 = IPv4v6 (0x0011), 0x0025 = 2, 0x001f = 1, everything else zero. `Profile1` is
+the default profile with no APN at all and `Profile3` is `SOS`. Slots 1/2/3 =
+default/ims/emergency is the Qualcomm convention. Grepping the whole config, the only
+Jio-identifying content anywhere is in `data/andsf.xml`, `data/default_andsf.xml` and
+`data/iwlan_s2b_config.txt` (the `epdg_fqdn`), none of which is the data profile.
+
+**Adding an item means editing `nv_items`, not just dropping a file in.** `mbn-tool`'s
+packer iterates the `nv_items` JSON and reads each item's bytes from `files/`; a file with
+no matching item entry is silently ignored. The entry is small:
+
+```json
+{"type": 2, "attributes": 25, "reserved": 0,
+ "filename": {"hex": "...", "ascii": "/Data_Profiles/Profile2 ", "__type__": "bytes"},
+ "data_magic": 7, "__type__": "MCFG_Item"}
+```
+
+That was done (minor version 52, 8732 bytes), and it loads, selects and activates. It is
+**not** sufficient. After a reboot the modem still reports:
+
+```
+qcril_qmi_imsa_reg_status_ind_hdlr:      ims_registered: 0
+qcril_qmi_imsa_get_ims_registration_info: ims_registration_network: 14   (LTE)
+qcril_qmi_imsa_get_ims_registration_info: ims registration error code: 0
+qcril_data_process_qmi_dsd_ind: pdn[0] name=bsnlnet
+```
+
+One PDN, the internet one. **No IMS PDN is ever brought up**, every `rmnet_data*` is DOWN,
+and `ofono`'s `Register()` returns `org.ofono.Error.Failed` with the same
+`setServiceStatus` refusal underneath.
+
+Two things did improve, and both are real: `qcril_qmi_imss_get_client_provisioning_config`
+now returns `qmi send sync res 0` where it returned `1` before, and IMSA now pushes
+registration-status *indications* rather than being silent. The IMS stack is running and
+reporting; it simply never starts a registration.
+
+The remaining asymmetry is the IMS parameter set itself. `rjil.mbn` has roughly fifty
+`nv/item_files/ims/*` items — `ims_operation_mode`, `ims_hybrid_enable`, `qp_ims_config`,
+`qp_ims_reg_config`, the `qipcall_*` family — and `row.mbn` has exactly one (`IMS_enable`).
+A modem IMS stack with no registration configuration plausibly declines to start, which
+would explain both the absent PDN and the `RIL_E_MODEM_ERR` on every attempt to enable a
+service. Scanned for carrier identity, only two of those items are Jio-specific:
+`qp_ims_ut_config` (XCAP server `jionet`) and `qp_ims_sms_config` (short code `10138`).
+The rest are generic 3GPP values — codec lists, service URNs, timers.
+
+So the next experiment is to import the generic IMS items into the patched `row.mbn`,
+excluding those two and the three ANDSF/iwlan data files. It is a bulk change and worth
+deciding deliberately rather than drifting into: it means running BSNL with another
+operator's IMS tuning, which is defensible for a proof but wants bisecting afterwards to
+find the item that actually matters.
+
+Still absent throughout: QMI service `0x20` (IMS Application).
 
 ### What the wider community reports about BSNL VoLTE
 
