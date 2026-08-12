@@ -1015,6 +1015,50 @@ treated as unverified until it can be seen from qcril's side or from QMI directl
 This is the strongest argument yet for reading `imsa`/`imss` over QMI rather than inferring
 from the HAL boundary.
 
+### The modem's own answer: client provisioning is off
+
+qcril's logging is gated by `persist.vendor.radio.adb_log_on`, which was already `1`, but
+`persist.vendor.radio.ril_extra_debug` and `ril_log_enabled` were **empty**. Setting both to
+`1` makes qcril log what it reads back from the modem at init — which is the first direct
+sight of modem state in this whole investigation, without writing a QMI client:
+
+```
+qcril_qmi_imss_get_ims_reg_config:              qmi send sync res 0
+qcril_qmi_imss_get_ims_reg_config:              IMS has_state: 1, state: 1
+qcril_qmi_imss_get_client_provisioning_config:  qmi send sync res 0
+qcril_qmi_imss_get_client_provisioning_config:  client_prov_enabled_valid: 1, client_prov_enabled: 0
+qcril_qmi_imss_get_client_provisioning_config:  wifi_call_valid: 1, wifi_call: 2
+```
+
+**`client_prov_enabled: 0`.** The modem reports IMS client provisioning disabled, and it
+says so with `valid: 1`, so this is a real value and not an absent field. A modem that
+considers the client unprovisioned does not register, which is consistent with everything
+observed: no error, no attempt, no IMS PDN.
+
+The lever for it is already known from the one good capture: ims `ConfigItem`
+`VLT_SETTING_ENABLED` (11) maps to radio config 23,
+`qcril_qmi_radio_config_imss_set_client_provisioning_config_req_handler`,
+`QCRIL_QMI_RADIO_CONFIG_CLIENT_PROVISIONING_ENABLE_VOLTE`. That is exactly the item the
+plugin sends. So the shape of the remaining problem is narrow:
+
+> the modem needs `client_prov_enabled = 1`; the call that sets it is one we already make;
+> the HAL says it is accepted; and the modem still reads back 0.
+
+Which is the delivery question from the previous section, now with a specific value to watch
+rather than a registration to wait for. The follow-up test — set via ofono, then restart
+`rild` and read the value back at init — did not produce data (the capture came back empty
+twice), so it remains untested rather than answered.
+
+If delivery turns out to work and the value still will not stick, the alternative is to find
+the NV item behind client provisioning and set it through the carrier config, the way
+`IMS_enable` and `qipcall_config_items` were — which is a route this port has already proven
+it can take.
+
+Also noted in passing: `persist.vendor.radio.vdp_on_ims_cap` is empty, and
+`qcril_qmi_imss_update_wifi_pref_from_ind_to_qcril_data` fails with
+`qcril_data_set_rat_preference res = 501 / QCRIL DATA API returned error` on every init.
+Neither is understood; the second is a real error nothing has accounted for.
+
 ### Open threads
 
 Every QMI service the VoLTE voice path needs is present, every setting is accepted, a
