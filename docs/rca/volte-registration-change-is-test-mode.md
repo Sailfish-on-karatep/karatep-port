@@ -342,7 +342,7 @@ Decoding the configs rather than reading their file sizes settles it. `row.mbn` 
 
 Two bytes. Every SIM on this device that is not Jio gets a modem configured with IMS
 **disabled** and voice pinned to the circuit-switched domain. That is why the modem publishes
-no IMS QMI services (0x12 IMSA, 0x1f IMSS, 0x20 IMSP, 0x21 IMS VT) for qcril's clients to bind
+no IMS QMI services (0x12 imss, 0x1f imsp, 0x20 imsvt, 0x21 imsa) for qcril's clients to bind
 to, which is why every IMSS request times out, which is why `setServiceStatus` cannot enable
 anything. The chain is complete from the two NV bytes up to ofono.
 
@@ -458,8 +458,9 @@ qcril_mbn_sw_send_activate_config_resp: Activation completed
 ```
 
 **and the modem publishes IMS QMI services for the first time.** `dump_servers` went from
-none of `0x12`/`0x1f`/`0x20`/`0x21` to three of the four present (`0x20`, IMS Application,
-still absent). Two NV bytes and a version bump; no carrier impersonation anywhere.
+none of `0x12`/`0x1f`/`0x20`/`0x21` to three of the four present — `0x20` (imsvt, video
+telephony) stays absent, and it turns out not to matter for voice. Two NV bytes and a
+version bump; no carrier impersonation anywhere.
 
 That is the barrier crossed. ofono still reports `Registered: false`, which is now a
 question about IMS registration on BSNL rather than about whether the modem has an IMS
@@ -712,6 +713,43 @@ always-registered stack and a VoLTE indicator need. Verified in the packed file.
 **not** by itself produce a registration, with or without the IMS bearer up, so it is a
 correctness fix rather than the answer.
 
+### What the QMI service IDs actually are
+
+Settled from the device rather than from a published table. `/vendor/lib64/libqmiservices.so`
+exports one `<name>_qmi_idl_service_object_v01` data symbol per service, and the
+`qmi_idl_service_object` structure carries the service ID as its third `uint32`. Reading
+them straight out of the ELF:
+
+| id | service | published by this modem |
+|---|---|---|
+| `0x12` | **imss** — IMS Settings | yes |
+| `0x13` | ims_qmi | no |
+| `0x1f` | **imsp** — IMS Presence | **yes** |
+| `0x20` | **imsvt** — IMS Video Telephony | **no** |
+| `0x21` | **imsa** — IMS Application | yes |
+| `0x24` | pdc | yes |
+| `0x28` | imsrtp | yes |
+| `0x46` | **lte** | **no** |
+| `0x4d` | imsprivate | no |
+
+Two things this document got wrong are now corrected, and both mattered.
+
+**`0x20` is IMS Video Telephony, not presence.** The absent service is VT, which VoLTE
+voice does not need. Every service the voice path does need — settings, presence,
+application, RTP — is present. So "the modem is missing an IMS QMI service" has been a red
+herring for several rounds: it is missing the one for video calling.
+
+**Presence is present**, at `0x1f`. So `VOLTE_USER_OPT_IN_STATUS` returning
+`CONFIG_WRITE_FAILED` is *not* the service being absent, as guessed above — the write
+reaches a live presence service and that service refuses it. Worth noting too that the item
+is a *presence* config, i.e. about RCS presence opt-in; the VoLTE setting proper is
+`VLT_SETTING_ENABLED`, which this modem accepts.
+
+**And the QMI LTE client's timeout is explained**: `lte` is service `0x46`, and the modem
+publishes nothing above `0x37` in that range. The service does not exist on this firmware,
+so qcril's attempt to bind it can only ever time out. That is a cosmetic init failure, not
+a fault to chase.
+
 ### qcril's QMI LTE client times out at every start
 
 Watching a full `rild` start rather than the IMS path alone turns up something that was
@@ -723,10 +761,9 @@ qcril_qmi_init_core_client_handles: qmi_client_init_instance returned failure((-
 ```
 
 Every other core client — VOICE, DMS, NAS, PBM, RF SAR, WMS, RFRPE — returns 0. This one
-times out, on every start, and it has presumably been doing so since the port began. Its
-relevance to IMS is unproven and it may be unrelated, but it is a real init failure in the
-telephony stack that nothing else has accounted for, and it is worth understanding before
-guessing further.
+times out, on every start, and it has presumably been doing so since the port began.
+Resolved by the service-ID table above: `lte` is `0x46`, this modem does not publish it,
+and the timeout is therefore expected and harmless.
 
 For the record, the complete QMI service list the modem publishes in this state:
 
@@ -740,16 +777,22 @@ For the record, the complete QMI service list the modem publishes in this state:
 
 ### Open threads
 
-1. **The missing QMI service `0x20`.** It has never appeared, at any point, under any
-   config. qcril's presence write failing is consistent with the presence service being the
-   absent one, but that identification is **not proven** — establish what `0x20` actually is
-   from the firmware rather than assuming it from a table.
-2. **The QMI LTE client timeout**, above.
-3. **The one item we cannot set.** If `VOLTE_USER_OPT_IN_STATUS` is genuinely the flag the
-   Xiaomi code writes, then this modem refusing that write may be the whole remaining story
-   — and the fix would be to set the underlying NV item through the carrier config instead
-   of over QMI, the same way `IMS_enable` and `qipcall_config_items` were.
-4. **ofono never activates the IMS context on its own.** Whether that matters depends on
+Every QMI service the VoLTE voice path needs is present, every setting is accepted, a
+bearer can be established on the right profile, and the modem does not register. What is
+left to find is why the modem's IMS stack never starts, and the useful next question is
+what it reports about itself rather than what it accepts from us:
+
+1. **Ask the modem directly.** qcril only ever logs what it sends. `imss` (`0x12`) and
+   `imsa` (`0x21`) are both live and both have *get* messages — service enable config,
+   registration status, service status. A small QMI client over `/dev/socket/qmux_radio` or
+   the IPC router, using the service objects in `libqmiservices.so`, would show the modem's
+   own view instead of ours. That is the first thing that would distinguish "configured but
+   idle" from "trying and failing silently".
+2. **`VOLTE_USER_OPT_IN_STATUS` still cannot be written**, even though presence is live. If
+   it is genuinely the flag the Xiaomi code writes, the remaining fix may be to set the
+   underlying NV item through the carrier config instead of over QMI, the same way
+   `IMS_enable` and `qipcall_config_items` were.
+3. **ofono never activates the IMS context on its own.** Whether that matters depends on
    whether this modem's IMS stack wants an AP-established bearer at all; on modem-side IMS
    it normally brings up its own. Worth settling before building anything.
 
