@@ -557,13 +557,67 @@ service. Scanned for carrier identity, only two of those items are Jio-specific:
 `qp_ims_ut_config` (XCAP server `jionet`) and `qp_ims_sms_config` (short code `10138`).
 The rest are generic 3GPP values — codec lists, service URNs, timers.
 
-So the next experiment is to import the generic IMS items into the patched `row.mbn`,
-excluding those two and the three ANDSF/iwlan data files. It is a bulk change and worth
-deciding deliberately rather than drifting into: it means running BSNL with another
-operator's IMS tuning, which is defensible for a proof but wants bisecting afterwards to
-find the item that actually matters.
+### The IMS parameter set, and the one item that matters
 
-Still absent throughout: QMI service `0x20` (IMS Application).
+Importing the 46 generic items (all of `nv/item_files/ims/*` except `IMS_enable`, already
+present, and the two carrier-specific ones) produced the first unambiguous acceptance:
+
+```
+ims:imsradio0 IMS voice service enabled
+```
+
+`setServiceStatus` succeeds, `Register()` returns instead of `org.ofono.Error.Failed`, and
+there are **no `ril_err` / `qmi res:` / "Failed to change IMS state" lines left at all**.
+
+Bisecting it took three rounds, each a stage, forced reload, reboot and test:
+
+| round | items | `setServiceStatus` |
+|---|---|---|
+| 1 | the 21 non-`qipcall_*` items | **refused** |
+| 2 | the 25 `qipcall_*` items | **accepted** |
+| 3 | `qipcall_config_items` alone | **accepted** |
+
+One item. `nv/item_files/ims/qipcall_config_items` is the QIPCALL configuration blob, and
+decoded it reads:
+
+```
+Version 26, EnableRtcpForActiveVoipCall 1, DesiredQosStrength 1,
+VideoMediaProfileMode 3, VtCallingEnabled 1, MobileDataEnabled 1,
+VolteDisabled 0, CvoEnabled 1, VideoFeatureTag "video"
+```
+
+`VolteDisabled = 0`. With the item absent the modem has no QIPCALL configuration at all,
+`qcril_qmi_imss_set_qipcall_config` fails with `RIL_E_MODEM_ERR`, and nothing above it can
+enable a service. It contains no carrier identity — it is a generic VoLTE/VT enablement
+blob — so this is a defensible thing to carry rather than a borrowed setting.
+
+The other group is not useless. With only `qipcall_config_items` the reported radio
+technology is `radiotech:21` (INVALID) and `Register()` still returns
+`org.ofono.Error.Failed`, because `requestRegistrationChange` needs something in the
+non-`qipcall` set; with all 46 it reads `radiotech:15` (LTE) and `Register()` succeeds. So
+the minimum for "VoLTE is permitted" is one item; the minimum for "the whole path works" is
+larger and has not been bisected. The device is left carrying all 46.
+
+### Still not registering
+
+Even with everything above accepted, IMS does not register. After three minutes:
+
+```
+QtiRadioRegInfo state:1 radiotech:15 error_code:0     (NOT_REGISTERED, LTE, no error)
+qcril_data_process_qmi_dsd_ind: pdn[0] name=bsnlnet
+```
+
+Still one PDN, no `rmnet_data*` addresses, no IMS PDN, and `error_code: 0` — the modem is
+not reporting a failure, it simply never starts. The remaining candidates, in the order
+worth testing:
+
+1. **BSNL is not actually providing IMS to this subscriber on this cell.** `ACTVOLTE` was
+   sent to 53733 the night before this run, but nothing confirms provisioning took effect,
+   and BSNL's VoLTE is a 2024–25 rollout that is circle-by-circle. This is the cheapest
+   thing left to establish and it invalidates everything below if true.
+2. The attach profile: `rjil.mbn` carries `data/ds_dsd_attach_profile.txt`
+   (`Attach_Profile_ID:1`) and the patched config does not.
+3. QMI service `0x20` (IMS Application) has never appeared, at any point in any of this.
 
 ### What the wider community reports about BSNL VoLTE
 
