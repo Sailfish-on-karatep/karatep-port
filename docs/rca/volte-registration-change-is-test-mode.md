@@ -648,6 +648,47 @@ So the current state of the device is: IMS enabled in NV, voice domain IMS-prefe
 IMS parameter set present, an IMS data profile present, `VLT_SETTING_ENABLED = 1` accepted,
 the VoLTE service status accepted — and every request the stack makes now returns success.
 
+### A working handset on the same SIM runs the Reliance config
+
+The decisive evidence came from putting the BSNL SIM into a handset where its VoLTE works —
+a Xiaomi `aliothin` (M2012K11AI, Snapdragon 870), stock, unrooted — and reading its state
+over `adb`. Two things it says are worth more than everything inferred up to this point.
+
+**It selects Jio's carrier config for the BSNL SIM.**
+
+```
+persist.radio.mbn_sw_sub0 = NV#71546=7;Commercial-Reliance(0x0A011B16)
+persist.radio.mbn_sw_sub1 = NV#71546=23;Inactive
+```
+
+`sub0` is the BSNL subscription — the only SIM present, `phoneId=0 subId=7`, numeric
+`40480`, data on `bsnlnet`. The active software MBN for it is **`Commercial-Reliance`**,
+which is the same operator string carried by this device's own `rjil.mbn`. A handset on
+which BSNL VoLTE demonstrably works is running BSNL on the Reliance commercial config.
+
+That reverses a judgement made early in this document. Relabelling `rjil.mbn` to match
+BSNL was dismissed as "good enough to prove the mechanism; questionable as a shipped
+configuration". It is not questionable — it is what a shipping handset does. The objection
+raised at the time, that it would bring Jio's APN and VoWiFi settings, is answered by the
+same evidence: a working phone carries them and BSNL works anyway.
+
+**And there is no IMS APN data call.** The only `ApnSetting` in
+`mPreciseDataConnectionStates` is `bsnlnet` with types `supl | hipri | default`. A handset
+doing VoLTE on BSNL right now has no framework-visible `ims` PDN at all, which confirms the
+modem establishes its own internally and makes the AP-side IMS context activated earlier a
+harmless red herring rather than the mechanism.
+
+Supporting values from its carrier config, which also close off two suspicions:
+`carrier_volte_provisioning_required_bool = false` — so no provisioning gate, and the
+`VOLTE_USER_OPT_IN_STATUS` write this modem refuses is not the blocker — and
+`allowed_initial_attach_apn_types_string_array = [ia, default, mms, dun]`, with `ims`
+deliberately absent from the attach types.
+
+The next experiment follows directly: add BSNL's match (MCC 404 / MNC 80, and the IIN
+`8991805`) to `rjil.mbn`'s `MCFG_TRL` trailer so the modem selects it for this SIM. The
+edit round-trips through `mbn-tool` cleanly — appending an `MnoId` to `trailer.mnoid.ids`
+repacks and reads back correctly — so it is mechanically straightforward.
+
 ### Why the Pixel/Xiaomi class of fix has nothing left to give us
 
 [`kyujin-cho/pixel-volte-patch`](https://github.com/kyujin-cho/pixel-volte-patch) is the
