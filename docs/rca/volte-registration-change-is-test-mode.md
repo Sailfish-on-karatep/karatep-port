@@ -1278,11 +1278,20 @@ Design points worth keeping:
   across reboots, so a marker file short-circuits later boots and the single `rild` restart
   is paid once. If `/data` is wiped the marker goes with it and it runs again.
 
-One caveat for this particular handset: the packaged config bumps the vendor file's MCFG
-minor from 50 to 51, while the test device's modem is still carrying the experimental v58
-build. qcril skips a config whose version is not newer, so on *this* device the packaged
-config will not be loaded until the modem is given something above 58. A freshly flashed
-device has no such history and takes 51 normally.
+A caveat was recorded here that the test device's modem was still carrying the experimental
+v58 build, so the packaged config — which bumps the vendor file's MCFG minor from 50 to 51 —
+would be skipped on this handset until it was given something above 58. **That was wrong,
+and the modem says so directly.** Read out of NV over diag:
+
+```
+/nv/item_files/mcfg/mcfg_sw_muxd_version_8   33 08 03 05   = (51, 8, 3, 5)
+```
+
+which is `row_ims_v51.mbn` exactly. The packaged config is what the modem is actually
+running; the experimental v58 build is not active and never became active. Everything else
+in NV agrees: `ims/IMS_enable = 1` and `mmode/voice_domain_pref = 3` are set, on both
+subscriptions, and none of the items that only ever existed in the higher-numbered
+experimental builds are present.
 
 ### Device state
 
@@ -1320,3 +1329,75 @@ either way.
 - **Not the LTE attach or the IMS PDN.** The device is registered on LTE with data working.
 - **Not `persist.dbg.volte_avail_ovr`.** That property gates the *Android framework's* VoLTE
   UI, not the modem, and nothing on Sailfish reads it.
+- **Not the 2019 QCN repair.** See below — the question was asked directly and answered by
+  reading the modem's own NV.
+
+## Reading the modem's NV directly, over `/dev/diag`
+
+Everything above infers the modem's state from qcril's logging. That inference can now be
+replaced with a direct reading, which changes what several earlier claims are worth.
+
+`/dev/diag` is present on this device, `crw-rw-rw-`, with `CONFIG_DIAG_CHAR=y` and the modem
+SMD channels up. That is the same channel QPST and QXDM drive over USB, and it can be driven
+locally — which avoids changing the USB composition and dropping the RNDIS link. The
+transport is defined by our own kernel in `drivers/char/diag`:
+
+| | |
+|---|---|
+| `write(2)` | `int pkt_type` = `USER_SPACE_DATA_TYPE` (0x20), then an HDLC-framed DIAG packet — `diagchar_write()` |
+| `read(2)` | `int data_type`, `int num_entries`, then per entry `int len` + `len` bytes of HDLC — `diagchar_read()` / `diag_md_copy_to_user()` |
+| setup | `ioctl(fd, DIAG_IOCTL_SWITCH_LOGGING=7, {u32 req_mode=MEMORY_DEVICE_MODE, u32 peripheral_mask=DIAG_CON_ALL, u8 mode_param})` — `diag_switch_logging()` rejects an empty mask outright, and without the switch no response ever reaches the char device |
+
+`scripts/diag/` implements this: `diagefs.py` (transport + EFS2), `diagwalk.py` (recursive
+walk with timestamps), `diagnv.py` (legacy `NV_READ_F`). The EFS2 directory record layout was
+confirmed against real responses from this modem — `0 dirp, 4 seq, 8 errno, 12 entry_type,
+16 mode, 20 size, 24 atime, 28 mtime, 32 ctime, 36 name`, with seq 0 a null pseudo-entry and
+an all-zero record terminating the directory.
+
+### What the modem actually holds
+
+- `ims/IMS_enable = 01` and `mmode/voice_domain_pref = 03`, on **both** subscriptions. The
+  MBN patch is genuinely live in NV, not merely believed to be.
+- `mcfg/mcfg_sw_muxd_version_8 = (51, 8, 3, 5)` — the packaged config, as above.
+- `ims/qp_ims_plani_config` carries ASCII `404` and `80`: the modem has BSNL's PLMN.
+- **`/nv/item_files/ims` contains eight files, and not one of them is an IMS profile item.**
+  No `qipcall_config_items`, no `qp_ims_reg_config`, no `qp_ims_sip_extended_0_config`, no
+  `qp_ims_param_config`, `qp_ims_voip_config` or `qp_ims_media_config`. The modem has IMS
+  switched on and no IMS configuration to run it with.
+
+The four items in the stock `row.mbn` *did* materialise into EFS, so MCFG activation does
+write here; the absence of the rest is real, not an artefact of where MCFG stores things.
+`rjil.mbn` — the config that made VoLTE work on this handset on stock — supplies 46 of them.
+
+### The 2019 QCN restore is visible, and is not the cause
+
+The user rebuilt this modem's EFS in 2019 after a bad flash zeroed both IMEIs, hand-entering
+the IMEIs and later doing something further to restore VoLTE on Jio. That history is still
+live: `rawprogram0.xml` in the Lenovo QPST package gives `modemst1`, `modemst2`, `fsg` and
+`fsc` all `filename=""`, so no firmware flash has ever reset them.
+
+It is also plainly visible. Timestamps separate the two writers cleanly — MCFG-written items
+carry no mtime, QCN-restored ones carry theirs — and **436 files under `/nv/item_files` are
+stamped 2019-11-22**, against 533 with none. That is a wholesale restore, matching the
+account exactly.
+
+It is nevertheless not implicated:
+
+- **The IMEI is well-formed.** `NV_UE_IMEI_I` (550) reads back as a valid 15-digit IMEI with
+  a correct Luhn check digit and a plausible TAC. This mattered because IMS registration
+  carries the IMEI in the SIP instance-id, and a malformed one is a real cause of
+  network-side rejection. It is not malformed.
+- **The restore left no config-selection residue.** `mcfg_setting` and
+  `mcfg_setting_Subscription01` are stamped 2019-11-22, but their contents are byte-identical
+  to `mcfg_setting_Subscription02`, which the restore never touched. Whatever was done in
+  2019 set those items to the values the modem defaults to anyway.
+- **`mcfg_autoselect_by_uim = 0`** on all three subscriptions, which is normal for a target
+  where qcril drives PDC selection, not evidence of a forced-config hack.
+- And the strongest argument is the user's own history: VoLTE worked on Jio on this handset
+  *after* the repair, so the modem's IMS stack registered successfully in exactly this NV
+  state.
+
+Backups of `modemst1`, `modemst2`, `fsg` and `fsc` were taken before any of this
+(`dd` from `/dev/mmcblk0p29`, `p30`, `p32`, `p18`) and are restorable the same way. `fsg` is
+a signed `IMGEFS` blob and `modemst1`/`modemst2` are opaque on disk — neither can be read
+without the modem, which is why the diag route was needed at all.
