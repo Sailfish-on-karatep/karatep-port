@@ -43,6 +43,16 @@ instructions use raw `mmcblk0p*` nodes.
   `CONFIG_ANDROID_BINDER_DEVICES="binder,hwbinder,vndbinder"`. Writing `=y` is silently
   discarded and the Kconfig default is used instead — it happens to be the same value, so the
   mistake is invisible until a Kconfig change drops a binder node.
+* **exFAT comes from `sdfat`, and `CONFIG_SDFAT_USE_FOR_VFAT` must stay unset.** `CONFIG_SDFAT_FS`
+  and `CONFIG_SDFAT_USE_FOR_EXFAT` both default to `y` in `fs/sdfat/Kconfig`, so exFAT works
+  without appearing anywhere in `karatep_defconfig` — reading the defconfig alone suggests it is
+  missing, while `/proc/filesystems` on the device shows `sdfat` and `exfat`. `USE_FOR_VFAT`
+  defaults to `y` too, and that one is actively harmful here: it makes sdfat register a second
+  filesystem named `vfat`, which collides with the in-tree `CONFIG_VFAT_FS=y` (`fs/Makefile` links
+  `fat/` before `sdfat/`, so the in-tree driver wins and sdfat's registration returns `-EBUSY`).
+  `sdfat_init()` treats that as fatal and `goto error`, unwinding the whole driver — including the
+  `exfat` registration it made moments earlier. Leaving it set therefore costs exFAT entirely, and
+  the only symptom is one line in dmesg.
 * **Flattened-APEX linker spam** (`Expecting header 0x53595354 but found 0x564e4452`) — see
   [rca/vndservicemanager-libbinder.md](rca/vndservicemanager-libbinder.md). Fixed properly by
   the `karatep-patches` `system/core/0040..0042`; the older advice to "apply the linkerconfig patch" only

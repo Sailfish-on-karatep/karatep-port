@@ -140,7 +140,7 @@ defconfig, or on reading the consuming daemon's source — not on inspection of 
 | 22 | usb-moded vs Android USB in `*.rc` | ✅ `vendor.usb-hal-1-2` is disabled, and the `android_usb` writes left in `/vendor/etc/init/hw/init.qcom.usb.rc` sit behind `on property:sys.usb.config=*` triggers usb-moded never sets. The `iSerial`/`iManufacturer` writes are the sanctioned Android-side serial logic |
 | 23 | Touch reporting | ⚠️ works in daily use, but the checklist's specific concern — display power cycling with a finger already on the screen — is untested |
 | 24 | Act dead mode | ❓ `jolla-actdead-charging` installed and `actdead.target` exists, but act-dead has never been entered |
-| 25 | Extra filesystems | ⚠️ F2FS, VFAT, FUSE and OVERLAY are in. **BTRFS, UDF, NFS, CIFS, exFAT/NTFS, ISO9660 and SQUASHFS are not.** BTRFS is separately why factory reset cannot work → [rca](rca/factory-reset-does-nothing.md) |
+| 25 | Extra filesystems | 🔧 **exFAT was already there** — the first pass read the defconfig and missed it, but `sdfat` is built in with `CONFIG_SDFAT_USE_FOR_EXFAT` defaulting to `y`, and the device's `/proc/filesystems` lists both `sdfat` and `exfat`. The real gap was BTRFS, UDF, NFS, CIFS, ISO9660, SquashFS and NTFS, all now enabled in `karatep_defconfig`. NTFS is read-only deliberately; `mer_verify_kernel_config` goes 45 → 30 warnings with no new ones. BTRFS still does **not** make factory reset work → [rca](rca/factory-reset-does-nothing.md) |
 
 Items 1, 2 and 17 are fixed in `droid-config-karatep` and **verified on hardware** — installed
 into `/etc` by hand and then confirmed across a cold boot, with no service restarts involved, so
