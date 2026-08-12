@@ -1397,6 +1397,62 @@ It is nevertheless not implicated:
   *after* the repair, so the modem's IMS stack registered successfully in exactly this NV
   state.
 
+### The modem never puts a REGISTER on the wire
+
+With the config gap closed — all 46 IMS profile items present in NV on both
+subscriptions, `RegOnMode = PowerOn`, LTE attached to BSNL, and the IMS bearer up
+(`rmnet_data1`, a real address from BSNL's `ims` APN) — IMS still does not register.
+qcril reports `IMS registered valid 1, Status 0` throughout.
+
+qcril's logging cannot say why: it only relays what IMSA reports, which is "not
+registered" whether the modem was refused or never tried. Those two have completely
+different fixes, so the question had to be settled directly. `scripts/diag/diagsip.py`
+enables the modem's own log masks and scans the raw frames for SIP, which Qualcomm
+carries as plain text rather than a QSR hash — so it can be found without a message
+database.
+
+**Nothing. Idle, and during a registration attempt, the modem emits no SIP at all.**
+
+The negative is sound rather than an artefact of looking in the wrong place:
+
+- Every equipment id 0–15 was enabled, i.e. the whole log mask, not a guessed code.
+- The modem emits **65 distinct log codes** over the window, including the IMS/data
+  range — `0x1544`, `0x158c`, `0x15bd`.
+- Text-bearing frames do arrive (`0x1486`), so the scan is capable of seeing text.
+- `imsdatadaemon`, `imsqmidaemon` and `ims_rtp_daemon` log **nothing** across a
+  registration attempt: the modem is not asking them for anything either.
+
+So the fault is entirely upstream of the network. Nothing is being refused, because
+nothing is being sent — which independently closes the carrier-whitelisting question
+that was raised earlier, and closes it from the handset side rather than by argument.
+
+`client_prov_enabled` is also off the table. A capture of
+`qcril_qmi_imss_get_client_provisioning_config` returns only `wifi_call status` and
+`wifi_call_preference` — this modem's provisioning response carries no `enable_volte`
+TLV at all, so the flag that looked like the blocker was never one.
+
+### The donor is carrier-neutral
+
+Jio's `rjil.mbn` is the only same-generation donor available: the Nokia 6 generic ROW
+config, from a newer LA.3.1.2 branch on the same SoC, uses an entirely different IMS
+item generation — `RegistrationConfiguration`, `IMSVoiceDynamicConfig`,
+`qp_ims_service_enablement_config` — with no name in common. That confirms at item
+granularity what was previously concluded for whole configs.
+
+Importing from a carrier config raises the obvious worry that Jio-specific parameters
+come with it. They do not. Of the 46 items imported, the only ones carrying any
+carrier-specific string are `qp_ims_ut_config` (`jionet`, XCAP ports) and
+`qp_ims_sms_config` — and both were already excluded from the list. What is imported is
+codec lists, timers, feature flags and generic 3GPP URNs.
+
+### No prior art
+
+`bin/ircgrep.sh` returns **zero hits** across eleven years of `#sailfishos-porters` for
+`ps_sys_data_configurations`, `mcfg_sw`, `EFS2`, `qp_ims_reg_config` and
+`client_prov_enabled`. The archive knows `/dev/diag` only as a permissions problem. No
+porter has taken this route before, so there is no prior art to follow and none of this
+should be expected to match someone else's notes.
+
 Backups of `modemst1`, `modemst2`, `fsg` and `fsc` were taken before any of this
 (`dd` from `/dev/mmcblk0p29`, `p30`, `p32`, `p18`) and are restorable the same way. `fsg` is
 a signed `IMGEFS` blob and `modemst1`/`modemst2` are opaque on disk — neither can be read
