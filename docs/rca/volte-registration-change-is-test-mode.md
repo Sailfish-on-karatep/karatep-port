@@ -1082,6 +1082,54 @@ Also noted in passing: `persist.vendor.radio.vdp_on_ims_cap` is empty, and
 `qcril_data_set_rat_preference res = 501 / QCRIL DATA API returned error` on every init.
 Neither is understood; the second is a real error nothing has accounted for.
 
+### Nokia 6 (D1C): same SoC, newer modem, and the end of the ROM hunt
+
+The Nokia 6 TA-1021 is MSM8937 — the same SoC as karatep — and its Pie firmware carries a
+modem a whole branch newer than ours:
+
+| | modem build |
+|---|---|
+| karatep (Nov 2017) | `MSM8937.LA.2.0-00440` |
+| Nokia 6 India (Feb 2019) | `MSM8937.LA.3.1.2-00360` |
+| Nokia 6 Global (Oct 2019) | `MSM8937.LA.3.1.2-00360` |
+
+Both images yield ~182 configs from `NON-HLOS.bin`. Three things come out of them, and
+together they close this line of enquiry.
+
+**No BSNL config, again.** Searching every config for the MnoId pair `404/80` byte-for-byte:
+zero hits in either image. Only four configs carry any MCC 404 at all — `w_one`, `airtel`,
+`idea`, `vdf/india` — the same picture as the 2024 Xiaomi set. That is now **three
+independent firmwares across seven years** (2017 Lenovo, 2019 Nokia India, 2024 Xiaomi) with
+no configuration for BSNL. The conclusion is not going to change with a fourth image.
+
+**Their generic config confirms the patch, for the third time.** `generic/common/row/commerci`
+is `ROW_Commercial`, a true wildcard (no IINs, no MNO ids), and it carries:
+
+```
+ims/IMS_enable                    = 1
+modem/mmode/voice_domain_pref     = ImsPsVoicePreferred
+64 items
+```
+
+Against our 2017 `ROW_Generic_3GPP`'s `0`, `CsVoiceOnly` and 4 items. Whatever else is
+unresolved, the two-byte patch is unambiguously the right change.
+
+**But it cannot be transplanted, and neither could any newer image.** Two independent
+blockers:
+
+- `format_type = 4`, where every config this modem loads is `format_type = 3`.
+- The IMS NV item generation changed with the modem branch. The Nokia config uses
+  `RegistrationConfiguration`, `IMSVoiceDynamicConfig`, `qp_ims_service_enablement_config`,
+  `ims_sip_config`, `ims_user_agent` — the same names as the 2024 Xiaomi set and *none* of
+  the `qp_ims_*` / `qipcall_*` names our LA.2.0 modem and its own `rjil.mbn` use.
+
+So the item that looks most relevant — `qp_ims_service_enablement_config` — describes service
+enablement on **LA.3.1.2**, and tells us nothing about where LA.2.0 keeps it. Newer firmware
+for this SoC exists and is readable, and it still cannot be backported: the boundary is the
+modem branch, not the chip.
+
+**Stop hunting ROMs.** The remaining answer is on the device, not in an image.
+
 ### Open threads
 
 Every QMI service the VoLTE voice path needs is present, every setting is accepted, a
