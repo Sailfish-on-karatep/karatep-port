@@ -648,7 +648,51 @@ So the current state of the device is: IMS enabled in NV, voice domain IMS-prefe
 IMS parameter set present, an IMS data profile present, `VLT_SETTING_ENABLED = 1` accepted,
 the VoLTE service status accepted — and every request the stack makes now returns success.
 
-### A working handset on the same SIM runs the Reliance config
+### The call our stack has never made
+
+The BSNL SIM was moved into a handset where its VoLTE works — a Xiaomi `aliothin`
+(M2012K11AI, Snapdragon 870), stock, unrooted — and its radio log read over `adb`. The
+timeline is unambiguous:
+
+```
+08-12 15:00:07  card[0] state:card_state:1              SIM inserted
+08-12 15:00:11  ACTION_SIM_STATE_CHANGED LOADED
+08-12 15:00:11  qcril_qmi_imss_set_ims_service_enable_config_resp_hdlr: ril_err: 0, qmi res: 0
+08-12 15:00:11  qcril_qmi_imss_set_ims_service_enable_config_resp_ims_reg_change_hdlr: ril_err: 0, qmi res: 0
+08-12 15:00:15  SST: [0] setImsRegistrationState: {registered=true mImsRegistrationOnOff=true}
+```
+
+**IMS registered eight seconds after the SIM went in, off the back of
+`set_ims_service_enable_config`** — QMI IMSS "set IMS service enable config". No reboot, no
+carrier-config reload.
+
+Our qcril has that same function:
+
+```
+qcril_qmi_imss_set_ims_service_enabled
+qcril_qmi_imss_set_ims_service_enable_config_resp_hdlr
+qcril_qmi_radio_config_imss_set_ims_service_enable_config_req_handler
+```
+
+and **it has never been called** — zero occurrences across the entire radio buffer, through
+every experiment in this document. `setServiceStatus` on this qcril generation routes to
+`set_qipcall_config` + `set_reg_mgr_config` instead, and `setConfig` routes by item:
+
+| ims.apk `ConfigItem` | radio config | handler |
+|---|---|---|
+| `VLT_SETTING_ENABLED` (11) | 23 | `set_client_provisioning_config` → `CLIENT_PROVISIONING_ENABLE_VOLTE` |
+| `VOLTE_USER_OPT_IN_STATUS` (33) | 42 | `set_presence_config` → `PRESENCE_VOLTE_USER_OPTED_IN_STATUS` (write fails) |
+
+Neither is the service-enable path. Of qcril's radio-config item names, exactly one belongs
+to that family — `QCRIL_QMI_RADIO_CONFIG_IMS_SERVICE_ENABLE_MOBILE_DATA_ENABLED` — and the
+`ConfigItem` that plausibly maps to it is `CONFIG_ITEM_MOBILE_DATA_ENABLED` (26), which we
+have never sent. Also unexplored and in the same neighbourhood:
+`QCRIL_QMI_RADIO_CONFIG_QIPCALL_VOLTE_ENABLED`.
+
+So the modem has been told, in this document's own words, "everything" — except the one
+thing the working handset actually says to it.
+
+### The Reliance config property is probably stale — treat the previous section with care
 
 The decisive evidence came from putting the BSNL SIM into a handset where its VoLTE works —
 a Xiaomi `aliothin` (M2012K11AI, Snapdragon 870), stock, unrooted — and reading its state
@@ -666,11 +710,25 @@ persist.radio.mbn_sw_sub1 = NV#71546=23;Inactive
 which is the same operator string carried by this device's own `rjil.mbn`. A handset on
 which BSNL VoLTE demonstrably works is running BSNL on the Reliance commercial config.
 
-That reverses a judgement made early in this document. Relabelling `rjil.mbn` to match
-BSNL was dismissed as "good enough to prove the mechanism; questionable as a shipped
-configuration". It is not questionable — it is what a shipping handset does. The objection
-raised at the time, that it would bring Jio's APN and VoWiFi settings, is answered by the
-same evidence: a working phone carries them and BSNL works anyway.
+**This does not establish what it first appeared to.** `persist.radio.*` is persistent
+across SIM changes, and this phone's subscription history shows a Jio card
+(`carrierId=2018`, `simSlotIndex=-1`, `portIndex=0`) that has previously occupied slot 0 —
+every subscription on it is `isEmbedded=false`, i.e. a real card, not an eSIM profile.
+Worse, the radio log covering the BSNL insertion at 15:00:07 contains **no MBN or config
+selection activity at all**, so nothing shows the property being rewritten for this SIM.
+
+It is therefore quite possible the modem is running a Jio-selected config and BSNL VoLTE
+works on it regardless — which would be a different and weaker claim than "the modem
+selects Reliance for BSNL". An earlier revision of this document asserted the strong
+version and used it to reverse the judgement on relabelling `rjil.mbn`. That was premature:
+the observation is real, the inference was not established, and the credit for catching it
+belongs to the reviewer, not the analysis.
+
+Settling it needs the property observed being rewritten — a reboot of that handset with the
+BSNL SIM in, or a SIM reinsert with the vendor RIL at a verbosity that logs selection.
+Neither has been done. Until then, treat the Reliance observation as suggestive only, and
+prefer the service-enable finding above, which rests on a logged call rather than on a
+persistent property of unknown age.
 
 **And there is no IMS APN data call.** The only `ApnSetting` in
 `mPreciseDataConnectionStates` is `bsnlnet` with types `supl | hipri | default`. A handset
