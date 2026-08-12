@@ -942,6 +942,41 @@ For the record, the complete QMI service list the modem publishes in this state:
 
 `0x20` is absent and has been absent under every configuration tried.
 
+### The config-item sweep: what this qcril will and will not do
+
+`getConfig` (transaction 13, response 10) takes the same `ConfigInfo` as `setConfig` with
+only `item` filled in and writes nothing, so sweeping all 72 items is free of side effects.
+Built into the fork behind `QTI_IMS_CONFIG_PROBE`, it produced a clean split — **51 items
+supported, 21 refused**:
+
+| | items |
+|---|---|
+| supported | 1–13, 25, **26 (`MOBILE_DATA_ENABLED`)**, 27, 29, 31, 34–43, 45–56, 58–68 |
+| refused | 14, 15, **16–24**, 28, **30**, **32**, **33 (`VOLTE_USER_OPT_IN_STATUS`)**, 44, 57, 69–72 |
+
+Two conclusions, both firm.
+
+**The presence family is simply absent from this build.** Items 16–24 are the presence and
+publish group, and together with 30, 32 and 33 they are refused on *read* as well as write.
+So `VOLTE_USER_OPT_IN_STATUS` returning `CONFIG_WRITE_FAILED` was never the modem declining
+a value — that whole config path is unimplemented here. It has been dropped from the
+plugin, and the thread is closed. Note this is a different explanation from the one offered
+earlier in this document, which guessed at an absent presence *service*; the service is
+live at `0x1f`, it is qcril's config path that is missing.
+
+**`MOBILE_DATA_ENABLED` (26) is supported**, which makes it the viable candidate for
+reaching `QCRIL_QMI_RADIO_CONFIG_IMS_SERVICE_ENABLE_MOBILE_DATA_ENABLED` and thence QMI
+IMSS "set IMS service enable config". It is now sent alongside item 11, and the HAL
+**accepts** it (`setConfig accepted`).
+
+IMS still does not register, and one thing is *not* established: whether item 26 actually
+dispatches to the service-enable handler. `set_ims_service_enable_config` has still never
+appeared in any log, but neither have the `map_ims_config_to_radio_config_item` lines that
+were visible for items 11 and 33 earlier — so the routing for 26 is unconfirmed rather than
+disproved. The radio buffer is extremely chatty and rotates fast; catching it needs the
+capture armed before the request and correlated against ofono's own log in the same window,
+which has not yet been done cleanly.
+
 ### Open threads
 
 Every QMI service the VoLTE voice path needs is present, every setting is accepted, a
