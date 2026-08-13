@@ -3397,3 +3397,28 @@ The same boundary is worth auditing across the whole opcode table: any entry
 above 40 is unreachable on this handset, and `setServiceStatus` and the config
 calls being below it is the only reason the rest of this investigation had
 anything to work with.
+
+### Fixed and verified
+
+`ofono-binder-plugin-ext-qti` commit `eaf23dd` records the version the connect
+probe settles on, exposes it as `qti_radio_ext_get_version()`, and withholds the
+SMS interface from `qti_slot_get_interface()` below 1.2 so ofono stays on its
+RIL path.
+
+Built, installed, and tested with a send:
+
+```
+43 sendImsSms attempts:  0      (previously one per message, none ever answered)
+binder_sms_send() calls: 12     the stalled queue draining over RIL
+SMS errors:              none
+```
+
+Note that ofono still publishes `SmsCapable = true`. That property comes from
+`BINDER_EXT_IMS_INTERFACE_FLAG_SMS_SUPPORT` on the *IMS* interface in
+`qti_ims.c`, which this change does not touch; the routing decision that
+mattered reads the SMS interface, and that is now absent. The property is
+cosmetic here, but it is inaccurate and worth tidying separately.
+
+**This fixes the stuck UI, not VoLTE.** SMS over IMS cannot work on a 1.0
+IImsRadio -- the method does not exist -- and none of this touches the voice
+path, where `ims_rte` is still 0 and calls still fall back to CS.
