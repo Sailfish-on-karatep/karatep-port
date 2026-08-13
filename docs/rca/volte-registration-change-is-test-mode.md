@@ -2709,3 +2709,77 @@ The productive next step is not more static reading. It is to make rild say what
 it is doing: raise its log level (`persist.vendor.radio.ril_extra_debug` is
 already set, so the relevant control is elsewhere) or attach to the process, so
 that a call in and a queue out can be observed rather than deduced.
+
+## Stepping back: the registration is real, and setServiceStatus never mattered
+
+Two measurements taken from outside the control path change the picture more
+than anything in the last several sections.
+
+### There is IPsec on the IMS bearer
+
+`scripts/qmi/sipsniff.py` watches the IMS PDN with an unbound `AF_PACKET`
+socket (unbound deliberately: the bearer bounces during a re-registration and a
+bound socket dies with `ENETDOWN`, taking the capture with it). Over 100 seconds
+across a forced re-registration:
+
+```
+packets=266 udp=10 sip=0
+destinations seen:
+  10.208.123.39 proto=50    9      <- ESP, inbound, to the IMS bearer's own address
+```
+
+**Protocol 50 is ESP.** No plaintext SIP is visible because 3GPP IMS carries SIP
+inside an IPsec security association once the P-CSCF has challenged and the UE
+has authenticated. Inbound ESP addressed to our IMS IP means an SA exists, which
+means the REGISTER reached the core, was challenged, and was answered. The RF
+path is intact and the request is intact.
+
+That retires the reading of the earlier 408s as "nothing came back". Something
+does come back, and `QtiRadioRegInfo state:0` -- REGISTERED -- is reproducible on
+demand: toggling client provisioning VoLTE off and on over QMI (`imss 0x53`,
+tag 0x10) re-registers IMS every time.
+
+### setServiceStatus was never the blocker
+
+`qcril_qmi_imss_request_set_ims_srv_status` makes exactly two QMI sends:
+
+```
+mov w0, #0xc   mov x1, #0x53   mov w3, #0xac   ; QMI 0x53, request 172 bytes
+mov w0, #0xc   mov x1, #0x36   mov w3, #0x54   ; QMI 0x36, request  84 bytes
+```
+
+`0x53` is set client-provisioning config and `0x36` is set qipcall config -- the
+two legacy setters already written by hand with `scripts/qmi/setprovvolte.py`,
+and already reading back as 1. **So the entire HAL path, if it worked, would
+achieve exactly what is already in place.** Whether `IImsRadio` swallows the
+call or forwards it makes no difference to the modem's state, and the several
+sections of this document devoted to that path were chasing something that could
+not have been the cause.
+
+### What is actually left
+
+The modem is registered, provisioned and qipcall-enabled, and still reports:
+
+```
+qcril_qmi_imsa_service_status_ind_hdlr: VOIP: service_status(not valid)
+qcril_qmi_imsa_service_status_ind_hdlr: VT:   service_status(not valid)
+qcril_qmi_imsa_service_status_ind_hdlr: UT:   service_status(valid)
+```
+
+UT -- supplementary services -- is the one service the modem considers available,
+and it is also the one whose config the Jio donor filled in
+(`qp_ims_ut_config` = `jionet`). VOIP and VT are not available, `ims_rte` stays
+0, and every call goes CS.
+
+Which puts the Jio contamination back in the frame, sharply. The retargeted
+config also wrote Jio's SMS settings onto a BSNL SIM:
+
+```
+qp_ims_sms_config -> '10138'  '+g.3gpp.smsip'  '0x00000400'
+```
+
+`10138` is Reliance's SMSC. SMS over IMS is not a side issue here: `ims_rte` is
+written only when `qcril_sms_process_transport_nw_reg_info_ind` fires, and that
+indication has still never fired once. A UE told to register SMS over IMS
+against another operator's SMSC is a plausible reason for that, and it is a value
+this port introduced rather than one the device came with.
