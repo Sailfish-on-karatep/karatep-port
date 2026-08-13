@@ -1786,3 +1786,119 @@ hence a correct decode, hence `ENCODING` on a bad TLV — while the handler behi
 stub that returns `INTERNAL`. On this firmware VoLTE would be enabled the older way, through
 the 26 messages that do work plus the QIPCALL NV configuration. That is a testable claim, and
 it is where the next work goes.
+
+## Resolved: the Jio config, retargeted at BSNL, registers IMS
+
+The section above ends by naming the next experiment as an NV-side one. It was, but not the
+one I expected, and it worked on the first attempt.
+
+### Choosing a better donor
+
+The earlier "a complete commercial VoLTE config changes nothing" experiment used `3uk.mbn`
+retargeted at 404/80. That was the wrong donor: `UK3G_GBR` has never worked on this handset,
+so a null result from it says nothing about whether the mechanism works. `rjil.mbn` —
+`Commercial-Reliance` — is the config that demonstrably produced working VoLTE on *this*
+handset and *this* modem firmware under LineageOS. It is the only positive control available.
+
+Comparing the two configs' EFS items with `scripts/mcfg/mbnitems.py` also showed the hand-built
+`row_v61.mbn` in a new light. Its 50 items are a strict *subset* of Jio's 80. Everything we
+wrote, Jio writes too — so the 46-item import was not wrong, it was incomplete, in two ways:
+
+* **One value differs in an item we did copy.** `/nv/item_files/ims/qp_ims_reg_config` byte 0
+  is `01` in Jio's and `00` in ours. This item is never mentioned anywhere earlier in this
+  document; the difference had not been noticed.
+* **Thirty items were never copied at all**, among them `/Data_Profiles/Profile1..3` (Profile2
+  is the `ims` APN), `/pdp_profiles/consl_profiles/rmnet_call_prof_num` and
+  `socks_call_prof_num`, and the mode-manager domain preferences
+  `/nv/item_files/modem/mmode/sms_domain_pref`,
+  `/nv/item_files/modem/mmode/supplement_service_domain_pref` and
+  `/nv/item_files/modem/mmode/wifi_config`.
+
+### What was staged
+
+```sh
+scripts/mcfg/retarget.py rjil.mbn rjil_bsnl.mbn 404 80 8991805
+  config name: Commercial-Reliance
+  iin  [0]: 8991840 -> 8991805
+  plmn [0]: 405/840 -> 404/80
+  MCFG version: 061b0205 -> 071b0205
+```
+
+`scripts/mcfg/stage-rjil.sh` then stages every software config from
+`/vendor/firmware_mnt/image`, substituting `rjil_bsnl.mbn` for `rjil.mbn` — and staging
+`row.mbn` **stock**, not `row_v61.mbn`. That matters for attribution: stock ROW sets
+`IMS_enable=0`, so if the retarget were not selected, IMS would disappear entirely rather than
+be propped up by our patched fallback. There is no way to read the result ambiguously.
+
+It was selected first try, without a reboot:
+
+```
+qcril_qmi_pdc_select_config_ind_hdlr: Selected config for SUB0 is .../mcfg_sw/rjil.mbn
+qcril_qmi_pdc_select_config_ind_hdlr: Selected config for SUB1 is .../mcfg_sw/row.mbn
+qcril_qmi_pdc_activate_config_ind_hdlr: activate successful
+```
+
+`no such table` count 0, `sw_mbn_loaded=1`, and `/nv/item_files/mcfg/mcfg_sw_muxd_version_1`
+reads `071b0205` — our bumped Jio version. The items landed: `IMS_enable` `01`,
+`qp_ims_reg_config` byte 0 now `01`, `sms_domain_pref` `01`,
+`supplement_service_domain_pref` `03`, and `qp_ims_ut_config` carrying Jio's `jionet`.
+
+### Twenty-three seconds later, IMS registered
+
+```
+10:29:24  qcril_qmi_imsa_get_ims_registration_info: ims_registered: 0
+10:29:24  qcril_qmi_imsa_ims_registered_wlan_status: IMS service status valid 0
+10:29:47  qcril_qmi_imsa_reg_status_ind_hdlr: ims_registered: 1
+10:29:47  qcril_qmi_ims_map_qmi_ims_reg_state_to_ims_reg_state: qmi ims_reg_state 1 -> ims 3
+```
+
+ofono's `IpMultimediaSystem.Registered` also reads `true`, but that is worthless as evidence
+and was not used: it read `true` throughout the entire failure as well, which is the whole
+subject of the ofono all-zero-struct finding earlier in this document. The proof has to come
+from the modem.
+
+It does. Asking `imsa` (service `0x21`, port `0x39`) for message `0x20` returns the
+registration record, and TLV `0x15` is the **P-Associated-URI list**:
+
+```
+tlv 0x15 len 71  |.3sip:+91XXXXXXXXXX@ims.mnc080.mcc404.3gppnetwork.org.tel:+91XXXXXXXXXX|
+```
+
+That is the pair of identities BSNL's IMS core hands back in the `200 OK` to a successful
+`REGISTER`, and it contains the SIM's own MSISDN in a form the modem has no other way to
+learn. Message `0x21` corroborates it with eight service-status fields, `2` (full service) on
+both the VoIP and the VT entries, and `qcril_qmi_imsa_is_ims_registered_for_voip_vt_service`
+concludes `IMS registered for VOIP or VT service 1`.
+
+Registration is stable: over the whole log buffer, two `ims_registered: 1` indications and
+zero `ims_registered: 0`.
+
+**The modem is registered with BSNL's IMS network.** After a fortnight of the modem refusing
+to attempt registration at all, it did so within half a minute of being handed a carrier
+config that had actually worked on it before.
+
+### What this retires, and what it does not
+
+The `0x8f`/`0x90` enable-config pair still answers `3 INTERNAL`. Nothing ever made those two
+messages work, and VoLTE registration happened without them — which confirms the vintage
+reading in the sense that matters: **on this firmware, enablement is NV-driven, and the
+Android 11 QMI enable API is not the path.** Every attempt to reach VoLTE by finding the right
+QMI call to make, or the right HIDL `ConfigItem` to set, was aimed at a door this modem does
+not have. The `ext-qti` `setServiceStatus` work, item 26, the ConfigItem hunt — all of it was
+looking in the wrong layer.
+
+What is *not* yet known is which of the thirty-one differences did it. `qp_ims_reg_config`
+byte 0 is the obvious single-byte suspect, but `/Data_Profiles/Profile1..3` and the mmode
+domain preferences are equally plausible, and the honest answer today is that a config known
+to work was applied wholesale. Bisecting it matters, because the current state is Jio's config
+wearing BSNL's PLMN: it also writes Jio's `qp_ims_ut_config` (`jionet`), Jio's
+`qp_ims_sms_config` (SMSC `10138`), Jio's ANDSF policies and a `vowifi.jio.com` ePDG FQDN. A
+BSNL port should ship the minimal correct set on top of `ROW_Generic_3GPP`, not a retargeted
+Jio config.
+
+SMS appears unaffected so far — ofono still reports BSNL's real service centre and
+`Bearer = cs-preferred`, so messaging stays on CS — but `sms_domain_pref = 01` is now set and
+that needs watching.
+
+An actual VoLTE call has not been placed yet. Registration is not the same as a working call:
+SRVCC, codec negotiation and the CS fallback path are all still untested.
