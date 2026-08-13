@@ -1688,14 +1688,22 @@ empty request and records the result code, which partitions the service cleanly:
 | result | ids | reading |
 |---|---|---|
 | success | 26 | `0x26 0x28 0x29 0x2a 0x34 0x36 0x37 0x39 0x3d 0x3f 0x40 0x41 0x44 0x45 0x48 0x4a 0x4b 0x53 0x54 0x56 0x57 0x58 0x5d 0x5e 0x63 0x64` |
-| error 3 (`INTERNAL`) | 34 | includes both `0x8f` (`set_ims_service_enabled`) and `0x90` (`get_ims_service_enable_config`) |
-| error 17 | 2 | `0x66 0x89` |
-| error 54 | 13 | setters called with no TLVs |
-| error 57 | 49 | not implemented in this firmware |
+| 3 `INTERNAL` | 34 | includes both `0x8f` (`set_ims_service_enabled`) and `0x90` (`get_ims_service_enable_config`) |
+| 17 `MISSING_ARGUMENT` | 2 | `0x66 0x89` |
+| 54 `CAUSE_CODE` | 13 | setters, unhappy with an empty request |
+| 57 `INVALID_MESSAGE_ID` | 49 | not implemented in this firmware |
 
-So the "the modem's IMS task never started" hypothesis is **wrong**, and so is the milder
-"it does not implement these messages" — 26 messages answer, and the two that matter fail
-with `INTERNAL` rather than an unknown-message-id error, so their handlers exist and run.
+The error names are not guesses. `include/uapi/linux/ipa_qmi_service_v01.h` in our own kernel
+tree spells out enough of the shared QMI error enum — `INTERNAL` `0x0003`, `INVALID_ID`
+`0x0029`, `ENCODING` `0x003A`, `INCOMPATIBLE_STATE` `0x005A`, `NOT_SUPPORTED` `0x005E` — to
+pin it against libqmi's table, which agrees on every one of those values; `54` and `57` are
+read off that alignment.
+
+That matters for `0x8f`/`0x90` specifically. A message this firmware does not implement comes
+back `57 INVALID_MESSAGE_ID`, and 49 of them do. The enable-config pair instead comes back
+`3 INTERNAL`, so **their handlers exist, are dispatched to, and fail inside the modem.** Both
+the "the modem's IMS task never started" hypothesis and the milder "it does not implement
+these messages" are therefore wrong.
 
 What the 26 answers say is that the modem's IMS *settings* are fully and correctly
 provisioned for this SIM (`scripts/qmi/imssdump.sh`):
