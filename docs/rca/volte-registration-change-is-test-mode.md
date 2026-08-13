@@ -3199,3 +3199,82 @@ fails and the modem silently redials on CS (`qipcall_domain_selection_enable` is
 1, so it is permitted to), or whether the call is placed on IMS and then handed
 to CS. A capture filtered to the running rild across a single call, with the RAT
 polled alongside, would separate those.
+
+## Late session: two instrument faults, and a firm negative
+
+### The SMS transport was registering all along
+
+Every "0 occurrences" reported for the SMS transport indication in this document
+was grepping for `transport_nw_reg_info` -- **a string that does not exist in
+this build.** The real name is:
+
+```
+qcril_sms_process_transport_layer_info_ind: transport layer reg info value 1
+```
+
+With the correct name, an 8 MB radio buffer (`logcat -G 8M`) and continuous
+capture to a file, it fires cleanly and repeatedly, and
+`qcril_qmi_nas_set_registered_on_ims: registered: 1` with it. The indication had
+very likely been working for hours while being reported as never firing.
+
+### The "flap" was the test harness
+
+An earlier section describes the transport registering and dropping on a ~19
+second cycle. The context around each drop is
+`RIL_REQUEST_DEACTIVATE_DATA_CALL` -- the test script bouncing the bearer between
+attempts. Left alone, the transport registers and stays registered.
+
+Both faults pushed the same way: they made a working mechanism look broken, which
+is what sent this investigation through the MTU and SIP-transport theories.
+
+### Counting in the live logcat buffer is not safe
+
+The radio buffer defaults to 256 KiB and qcril is verbose enough to roll it in
+about a minute. A repeat test counting matches in the buffer produced 0 -> 1,
+1 -> 1, then **1 -> 0** across three identical attempts -- the count went *down*
+because the evidence had rolled away. Any count in this document taken from the
+live buffer rather than a continuous capture should be treated as unreliable.
+
+### The verdict, with everything verified beforehand
+
+State confirmed before the test, not after: bearer up, `QtiRadioRegInfo state:0`,
+`transport layer reg info value 1`, `set_registered_on_ims: registered: 1`,
+`imsa 0x21` reading `10=2 11=2 13=1 14=1 16=2 17=1`.
+
+A call placed in that state:
+
+```
+call mode 2                      CS
+Set audio call_type as VOICE
+csfb_in_alerting markers: 16     the unambiguous one
+voice_radio_tech 2: 49 samples
+ims rte 0 confd 4: 555 samples
+```
+
+ofono dialled over IMS (`ims:Dialing (ext)`) and the modem performed a CSFB
+regardless. The transport then drops, with
+`after lte voice and sms status rte changed` -- so the fallback kills the
+transport, not the reverse.
+
+### Where the analysis is thin
+
+`set_registered_on_ims` provably stores its argument and calls `update_ims_rte`:
+
+```
+0062c28c  str w0, [sp, #0x64]        argument saved at entry
+0062c8a4  ldr w9, [sp, #0x64]
+0062c8a8  str w9, [x8, #0x624]       the flag update_ims_rte reads
+0062c8ac  bl  #0x4ff2e4              update_ims_rte
+```
+
+and the ims_rte write at `0x4ff5d4` is inside that function -- there is no `ret`
+between its entry and the write. Yet `confd 4` is the value the *else* branch
+writes, and 555 consecutive samples carry it, so every time the function ran it
+took the zero path.
+
+The gap is that only the basic block at `0x4ff5d4` was read, never the control
+flow from the entry at `0x4ff2e4` down to it. There is very likely an earlier
+condition that returns before the flag is ever consulted. Tracing that path is
+the next concrete piece of work, and until it is done the claim that `ims_rte`
+is fed by the SMS transport should be treated as unproven rather than
+established.
