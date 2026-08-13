@@ -1716,10 +1716,10 @@ provisioned for this SIM (`scripts/qmi/imssdump.sh`):
 - `0x37` → three enable flags, all `1`.
 - `0x48` → the IMS PDN profile, APN `ims`.
 
-Every one of those is a read of stored configuration. Everything that fails is a query that
-would need a live IMS session layer to answer. The settings half of the modem's IMS stack is
-present and correct; the runtime half never comes up, and it will not say why — this is the
-same firmware that emits no F3 debug messaging at all, so there is no channel left to ask on.
+Every one of those is a read of stored configuration, and every one is correct. Whatever is
+wrong, it is not that the modem lacks provisioning for this SIM — and it will not say what is
+wrong, because this is the same firmware that emits no F3 debug messaging at all, so there is
+no channel left to ask on.
 
 ### The IMS bearer is not the trigger either
 
@@ -1730,3 +1730,59 @@ the sweep. The context comes up properly — `rmnet_data2`, address `10.206.179.
 sweep result is **byte-identical**: same 26 successes, same 34 `INTERNAL`s, same
 `0x8f`/`0x90`. The bearer is not the gate, and making ofono bring `context3` up
 automatically, while worth doing on its own merits, would not by itself produce VoLTE here.
+
+### Not a missing subscription bind
+
+The one cheap lever left in the QMI layer was that qcril binds its `imss` client to a
+subscription before it ever calls `0x8f`/`0x90`, and our raw client never does — a
+per-subscription handler asked without one has nothing to look up, which would explain
+`INTERNAL` neatly. `scripts/qmi/bindprobe.py` tests it: retry all 34 `INTERNAL` ids with a
+subscription selector in TLV `0x01` (as u32, then as u8), then walk the 13 `CAUSE_CODE`
+setters looking for one that a selector satisfies, re-asking `0x90` on the same client after
+each.
+
+None of it moves. What the retry does instead is settle the question underneath it: with an
+unexpected TLV, all 34 move from `3 INTERNAL` to **`58 ENCODING`**. The modem is decoding
+those requests against a real IDL and rejecting a field that does not belong — so the
+messages are properly declared, the empty request was the correct one, and `INTERNAL` is
+coming from inside the handler body. Only `0x66` accepted the selector (a u8 in TLV `0x01`,
+which is why an empty request got it `MISSING_ARGUMENT`), and `0x90` stayed `INTERNAL`
+afterwards.
+
+The handset was unharmed and still registered on LTE as `BSNL Mobile` after the probe.
+
+### The firmware itself: what it is and what it contains
+
+`scripts/qmi/modemims.sh` reads the modem image directly, which turns out to be worth doing
+before drawing conclusions about capability. The build banner:
+
+```
+MPSS.JO.2.0.c1-00122-8937_GENNS_PACK-1_20161209_043830
+```
+
+A December 2016 MSM8937 modem — the stock Android 6/7-era firmware this device shipped with,
+which LineageOS 18.1 keeps because the port runs on the vendor partition.
+
+Its symbol strings carry the whole IMS interface layer — `ims_task.cpp`,
+`ims_qmi_settings_service.c`, `ims_qmi_registration_apps_service.c`,
+`ims_qmi_presence_service.c`, `ims_qmi_dcm_client.c`, `ims_qmi_imsrtp_client.c`,
+`ims_reg_service_status.cpp` — *and* the session layer above it: `qipcallh.c`,
+`qipcall_conf_and_transfer_call.c`, `sipClientConnection.cpp`, with live log strings such as
+`SipConnection::Start INVITE_TRANS` and `qipcallh_process_incoming_call : PRACK or 100rel not
+in supported list rejecting the call`.
+
+I had started writing the opposite conclusion off a first scan that found no `SIP/2.0` and no
+`sip:` in `modem.b*`, which would have meant a firmware that cannot speak SIP at all. Widening
+the scan to the whole image directory finds `sip:`, and the QIPCALL and SIP-connection strings
+are unambiguous. **This modem contains a complete VoLTE stack.** The absent literals are an
+artefact of how the stack builds its messages, not evidence of absence — and this is exactly
+the firmware that did VoLTE on Jio on this handset under LineageOS, which independently
+settles the capability question.
+
+So the `INTERNAL` class is not a firmware that cannot do IMS. The best-supported reading now
+is a **vintage mismatch**: `0x8f`/`0x90` are the enable-config API that Android 11's qcril
+uses, and on a 2016 modem branch those ids can be declared in the service's message table —
+hence a correct decode, hence `ENCODING` on a bad TLV — while the handler behind them is a
+stub that returns `INTERNAL`. On this firmware VoLTE would be enabled the older way, through
+the 26 messages that do work plus the QIPCALL NV configuration. That is a testable claim, and
+it is where the next work goes.
