@@ -2434,3 +2434,59 @@ produces both a selected config and a live IMS module.
 been installed on this handset -- all staging so far has been by hand. That is
 the next step, and it has to come before any further call testing, because until
 it lands no test is measuring the whole stack at once.
+
+## Correction: rild restarts are not what kills IMS
+
+The section above concludes that `ctl.restart ril-daemon` leaves rild's IMS
+module inert, on the strength of a line count per rild pid: 234 lines mentioning
+"ims" from one instance, zero from the next. **That measurement is circular and
+the conclusion does not follow.** Counting log lines that mention IMS measures
+whether IMS is *doing* anything, and with no IMS bearer up there is nothing to
+do — so the count is zero whatever the module's state. The instance that scored
+234 was simply the one that happened to have a bearer and an active
+registration at the time.
+
+A clean reboot settles it. After one, with rild started by init rather than by
+`ctl.restart`, the same counts are zero: no lines mentioning IMS, no
+`QCRIL_EVT_IMS_SOCKET_REQ_*` events at all. If a restart were the cause, a boot
+would not reproduce it.
+
+So the catch-22 described above is not real either, and the reasoning that
+carrier-config staging must move to boot time because a rild restart poisons IMS
+is withdrawn. Staging at boot is still worth doing — it is the only way any of
+this survives a flash — but not for that reason.
+
+### What the reboot did establish
+
+Everything the modem was told survives a power cycle, which is worth knowing on
+its own:
+
+| item | after reboot |
+|---|---|
+| `mcfg_sw_muxd_version_1` | `071b0205` — the retargeted rjil config, still activated |
+| `/nv/item_files/ims/IMS_enable` | 1 |
+| `voice_domain_pref` | 3 |
+| reg-mgr P-CSCF (`imss 0x26`) | `61.2.220.137` |
+| client provisioning VoLTE / VT (`imss 0x54`) | 1 / 1 |
+| qipcall VoLTE (`imss 0x37`) | 1 |
+| IMS QMI services 0x12 / 0x21 / 0x22 | all present |
+
+The earlier claim that none of this survives a reboot was wrong in the same
+direction as the rest: the modem-side state persists in NV. What does not
+survive is the *staged file set* being re-selected, and the bearer, and any
+userspace scaffolding.
+
+### Where it actually stops
+
+With the bearer up after boot, there are still no IMS socket events and no
+`set_registered_on_ims`. But the measurement is blocked rather than negative:
+ofono is running with `OFONO_DEBUG=-d *` and reporting `Registered`,
+`VoiceCapable` and `SmsCapable` all true — so the ext plugin is loaded and its
+IMS interface is live — while journald shows zero lines mentioning `qti`,
+`imsradio` or `Setting service`. `-d *` on this stack floods journald hard
+enough to be rate-limited, and the lines that matter are being dropped.
+
+So the next step is a narrower ofono debug selector rather than `-d *`, so that
+`Setting service N status` and the `imsradio` transactions are actually
+recorded. Until then it cannot be said whether ofono is sending setServiceStatus
+this boot at all, and that is the one fact the whole remaining chain turns on.
