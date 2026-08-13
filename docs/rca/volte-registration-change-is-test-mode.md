@@ -2550,3 +2550,55 @@ Everything below that -- the config-item tables, the legacy/modern message
 split, the `ims_rte` writer chain ending at the SMS transport indication -- is
 mapped and correct, and none of it can be exercised while the HAL swallows the
 one call that would start it.
+
+## What serves imsradio0, and exactly where the call dies
+
+`imsradio0` is served by **rild itself**. Only two files on the device contain
+the interface name, `/vendor/lib64/vendor.qti.hardware.radio.ims@1.0.so` (the
+generated interface, no implementation) and `/vendor/lib64/libril-qc-qmi-1.so`,
+which rild loads. There is no separate IMS HAL process, which is why looking for
+one found nothing.
+
+The implementation is `ImsRadioImpl::setServiceStatus(int, ServiceStatusInfo
+const&)` at `0x1730ac`. Its structure:
+
+```
+0017 30f4  bl qcril_malloc_adv                    ; allocate the _ims_Info
+0017 30fc  cbnz x8, 0x1733f4                      ; allocated -> carry on
+0017 33fc  bl utils::convertHidlToProtoServiceStatusInfo
+0017 3404  cbz w0, 0x1736f8                       ; w0 == 0 -> dispatch
+...
+0017 36f8  mov w2, #0x1e                          ; _ims_MsgId 30 = SET_SERVICE_STATUS
+0017 3708  mov x3, x8                             ; the converted request
+0017 370c  bl ImsRadioImpl::processRequest
+0017 3710  str w0, [sp, #0x44]
+0017 3718  bl utils::isError
+0017 371c  tbz w0, #0, 0x173754                   ; not an error -> done
+0017 3734  bl qcril_free_adv                      ; error -> free the request
+0017 3750  bl ImsRadioImpl::sendEmptyErrorResponse
+```
+
+An important misreading to record, because it nearly produced the opposite
+conclusion. `convertHidlToProtoServiceStatusInfo` looks like a validating
+predicate, and `cbz w0` after it reads naturally as "conversion failed, bail" --
+which would have meant our `ServiceStatusInfo` payload was malformed and the
+bug was ours. It is not a boolean. Its return is `ldr w0, [sp, #0x9c]`, a local
+initialised to zero at entry, i.e. an **error code**, so `w0 == 0` is success
+and `cbz w0, 0x1736f8` is the *dispatch* path. The payload is fine; the
+conversion succeeds.
+
+So the call is converted and handed to `processRequest` with `_ims_MsgId 30`,
+which matches what qcril logged in the one working window
+(`map_event_to_request: event 851998 mapped to ims_msg 30`).
+
+**The drop is `processRequest` failing.** When it returns an error the
+implementation frees the request and calls `sendEmptyErrorResponse` -- the HIDL
+transaction completes normally, ofono sees response 6 and no transport error,
+and nothing whatsoever reaches qcril's IMS event loop. That is precisely the
+"accepted and silently dropped" behaviour this document has described from the
+beginning, and it is now located to the instruction.
+
+What is *not* yet established is why `processRequest` fails. It is inside rild,
+past the HIDL boundary, so the next step is that function and whatever state it
+checks -- most likely whether qcril's IMS module has a client registered on its
+event loop at all.
