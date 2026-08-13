@@ -2829,3 +2829,53 @@ What is left governing SMS over IMS is `SMS_OVER_IP` (config item 32, already 1)
 the SMSC just corrected, and whatever makes qcril's WMS client subscribe to the
 transport registration indication in the first place. The last of those is
 unexamined and is the only remaining candidate.
+
+## Root cause: SMS is configured CS_ONLY, and that is what puts every call on CS
+
+Sweeping the WMS service (0x05, node 0 port 0x27) with `scripts/qmi/wmsprobe.py`
+answers the question the previous section left open. Two messages settle it:
+
+```
+msg 0x47   result OK, no TLVs      GET_TRANSPORT_NW_REG_INFO -- nothing to report
+msg 0x40   tlv 0x01 = 02           GET_DOMAIN_PREF
+```
+
+The WMS domain-preference enum is `0 CS_PREFERRED, 1 PS_PREFERRED, 2 CS_ONLY,
+3 PS_ONLY`. **SMS on this modem is set to CS_ONLY.**
+
+That single value explains the whole symptom, and every link in the chain has
+been verified independently:
+
+| step | evidence |
+|---|---|
+| SMS domain preference is CS_ONLY | WMS 0x40 returns 2 |
+| so the modem never registers an SMS transport over IMS | WMS 0x47 returns success with no data |
+| so `qcril_sms_process_transport_nw_reg_info_ind` never fires | 0 occurrences in the radio log, all day |
+| which is the only caller of `qcril_qmi_nas_set_registered_on_ims` | PLT-resolved call graph |
+| which is the only writer of `nas_cached_info + 0x624` | only two stores to that field in the library |
+| which is the only input to `qcril_qmi_nas_update_ims_rte` | it branches on that field and nothing else |
+| so `ims_rte` stays 0 with confidence 4 | observed continuously |
+| so qcril's voice-domain selection picks CS | `is cs call: 1` |
+| so every call drops off LTE | the handset's own indicator, 4G to 2G |
+
+It also explains the asymmetry noticed earlier -- the modem reporting
+`UT: service_status(valid)` while VOIP and VT are not valid. Nothing was wrong
+with the voice configuration; voice was never going to be offered while the path
+that tells qcril "registered on IMS" was switched off at the SMS end.
+
+### It cannot be set at runtime on this firmware
+
+`QMI_WMS_SET_DOMAIN_PREF` (0x3f) is refused with error 71 for every tag
+(0x01, 0x10, 0x11) and every width (1, 2, 4). Nine encodings, one answer, so this
+is the operation being refused rather than the payload being malformed -- the
+same vintage story as `0x8f`/`0x90` on the imss side.
+
+Which leaves NV. `/nv/item_files/modem/mmode/sms_domain_pref` currently reads
+`01`, and it is another value the retargeted Jio config wrote. The NV enum is not
+the QMI enum -- NV `01` presents as QMI `2` (CS_ONLY) -- so the correct
+replacement value is not yet known and should not be guessed at blind;
+neighbouring items give the shape of the space (`voice_domain_pref` is `03` and
+presents as PS_PREFERRED, `supplement_service_domain_pref` is `03`).
+
+`scripts/qmi/efswrite.py` can write it, and the value survives a reboot, so the
+test is one write and one power cycle per candidate.
