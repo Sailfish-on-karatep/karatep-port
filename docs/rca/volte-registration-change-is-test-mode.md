@@ -1503,3 +1503,222 @@ Backups of `modemst1`, `modemst2`, `fsg` and `fsc` were taken before any of this
 (`dd` from `/dev/mmcblk0p29`, `p30`, `p32`, `p18`) and are restorable the same way. `fsg` is
 a signed `IMGEFS` blob and `modemst1`/`modemst2` are opaque on disk — neither can be read
 without the modem, which is why the diag route was needed at all.
+
+### The modem cannot be asked why, because it has no debug messaging
+
+`imss` message `0x8f`/`0x90` failing with `QMI_ERR_INTERNAL` rather than
+`QMI_ERR_INVALID_MESSAGE_ID` says the handler exists and fails inside itself. Qualcomm
+firmware normally explains exactly that in its F3 traces — `MSG_HIGH`/`MSG_ERROR` lines
+carrying the printf format string plus the source file and line — delivered over
+`/dev/diag` as packet `0x79`, or as a hash (`0x92`/`0x93`) on builds using QSR.
+
+Getting the runtime masks up took three corrections, all of them properties of this
+kernel's diag driver rather than of the protocol:
+
+- `diagchar_read()` waits in `wait_event_interruptible()` and ignores `O_NONBLOCK`, while
+  `diagchar_poll()` reports the device readable whenever the driver has been woken rather
+  than only when a batch is queued. So `select()` promises data that `read()` then blocks
+  on, forever. The only way to put a deadline on it is a repeating `SIGALRM` whose handler
+  raises — `diagefs.interruptible()`.
+- The read buffer must be large enough for a whole batch. `COPY_USER_SPACE_OR_EXIT()` in
+  `diagchar_core.c` fails the read with `-EFAULT` the moment `count` cannot take the next
+  frame, rather than returning what fits, so a buffer that is merely generous still loses
+  data under load. 1 MB is enough here; 256 KB is not.
+- In `DIAG_EXT_MSG_CONFIG_F` (0x7D) sub-commands 2 and 3 the SSID range comes **before**
+  the status word, per `struct diag_msg_build_mask_t` in `drivers/char/diag/diag_masks.h`:
+
+  ```
+  [0x7D][sub u8][ssid_first u16][ssid_last u16][status u8][pad u8][ rt_mask u32 * n ]
+  ```
+
+  Getting that wrong is silent: asking for 6000..6003 with the range one field too late
+  comes back describing 0..129, because the firmware reads the zero padding as the range.
+  Sub-command 1 (get SSID ranges) has no range and puts its status straight after the
+  sub-command. This modem declares 26 ranges, 0..129 through 49152..49251.
+
+With every one of those 26 ranges raised to all levels **and** every log mask raised, a
+five-second capture returns **1511 log packets and zero F3 messages** — none plain, none
+QSR-hashed. The log packets prove the capture path; the modem simply has messaging
+compiled out. `MSG_MASK_TBL_CNT` masks read back as non-zero defaults, so this is not a
+mask that failed to apply. There is no way to make this firmware say why `0x8f` fails.
+
+Raising all masks at once is also not free: the first (mis-framed) `SET_ALL_RT_MASK`
+pushed load average past 5 and wedged the diag channel until a reboot.
+
+### The 2019 provisioning is not it — the whole class is eliminated
+
+Two independent checks close this off.
+
+`/data/ps_sys_data_configurations.txt` looked promising: dated 2019-11-22, empty for
+subscription 0 and reading `2:2,0,Jionet,1,ims,; 3:1;` for subscription 1, exactly the
+shape of "Jio got an IMS APN configured and BSNL did not". It is a red herring. The
+string `ps_sys_data_configurations` does not appear anywhere in the running modem image,
+while `/Data_Profiles/Profile%u%1s` does — the file is a leftover from the stock Android 7
+firmware and this build never reads it.
+
+More conclusively, `scripts/diag/subdiff.py` compares every per-subscription item in EFS —
+the bare name against its `_Subscription01` twin. Of **71 pairs under `/nv`, exactly one
+differs**, `/nv/item_files/ims/qp_ims_config`, and the difference is ours: subscription 1
+still holds `rjil.mbn`'s value byte for byte, subscription 0 holds the same value with two
+bytes raised by our own QMI client-provisioning writes. There is no hidden per-SIM state
+that the Jio subscription received and the BSNL one did not.
+
+### How a config declares which SIMs it is for
+
+Every `mcfg_sw` config ends with an `MCFG_TRL` record holding TLVs of
+`[tag u8][len u16][value]`:
+
+| Tag | Meaning |
+|---|---|
+| 1, 5 | the MCFG version, `[minor, carrier, oem, family]` |
+| 3 | the config's name |
+| 4 | `[flag u8][count u8]` then `count` × `u32`, each an ICCID/IIN prefix as a decimal |
+| 6 | `[flag u8][count u8]` then `count` × (MCC `u16`, MNC `u16`) |
+
+Decoded across four files on this device:
+
+| File | Name | Records | IMS items | Matches |
+|---|---|---|---|---|
+| `row.mbn` | ROW_Generic_3GPP | 6 | 1 | PLMN list **empty** |
+| `rjil.mbn` | Commercial-Reliance | 97 | 49 | 405/840, 405/854…874; IIN 8991840…8991874 |
+| `3uk.mbn` | UK3G_GBR | 116 | 51 | 234/20, 235/94; IIN 894420 |
+| `mcfg_sw.mbn` | W-One_Th_Bringup | 133 | — | 310/480; IIN 8901000, 8900310, 8901001 |
+
+The empty PLMN list is what makes ROW_Generic the config every unmatched SIM falls
+through to. It also explains the device's history directly: **Jio VoLTE worked here
+because Jio has a dedicated 97-record config on this handset.** BSNL has never had
+anything but the 6-record generic one.
+
+### A complete commercial VoLTE config changes nothing
+
+That made the obvious experiment worth running: point a real, complete, known-good VoLTE
+config at the BSNL SIM and see whether IMS comes up. `scripts/mcfg/retarget.py` rewrites
+tag 4 and tag 6 **in place** — overwriting the first entry of each rather than appending —
+so every length in the file is unchanged and only the three SHA-256 hashes need redoing.
+`3uk.mbn` was retargeted from 234/20 to 404/80 and from IIN 894420 to 899180, with its
+MCFG minor bumped 5 → 6 so qcril would not skip the load.
+
+It was selected and applied, exactly as intended:
+
+```
+qcril_qmi_pdc_get_selected_config_ind_hdlr:
+    Store active config for SUB0 as /data/vendor/radio/modem_config/mcfg_sw/3uk.mbn
+qcril_qmi_pdc_get_selected_config_ind_hdlr:
+    Store active config for SUB1 as /data/vendor/radio/modem_config/mcfg_sw/row.mbn
+qcril_mbn_sw_activate_config_hndlr: result: 0
+```
+
+and it really did reach the modem — `/nv/item_files/ims/qp_ims_config` read back as
+`000002000000000203…`, byte-identical to the value carried in `3uk.mbn`'s own record, and
+it survived a reboot.
+
+The result, both immediately and after a clean reboot with the config still applied and
+the handset registered on LTE as "BSNL Mobile":
+
+- `imsa` `query_ims_srv_status` — every service TLV zero, as before;
+- `imss` `get_ims_service_enable_config` (`0x90`) — `result=1 error=3`, `QMI_ERR_INTERNAL`,
+  as before;
+- ofono — `Registered: false`, `VoiceCapable: false`, as before.
+
+**The carrier configuration is not the gate.** A genuine commercial VoLTE config, with 51
+IMS items against ROW_Generic's one, correctly selected for this SIM and activated by the
+modem, produces exactly the same refusal.
+
+Taken with the earlier import, that closes the class rather than just this instance. Jio's
+46 IMS items were written into NV directly and changed nothing; Three UK's 51 were
+delivered the sanctioned way, by an activated config, and changed nothing. The two donors
+share 44 items, so there is no third arrangement of the same values left to try.
+
+Backing the experiment out takes one more step than putting the stock `3uk.mbn` back.
+qcril keeps its selection tables in an SQLite database at `/data/vendor/radio/qcril.db`:
+
+```
+CREATE TABLE qcril_sw_mbn_mcc_mnc_table
+    (FILE TEXT, MCC TEXT, MNC TEXT, VOLTE_INFO TEXT, MKT_INFO TEXT, LAB_INFO TEXT,
+     PRIMARY KEY(FILE, MCC, MNC))
+```
+
+and the row it wrote while the retargeted file was staged —
+`…/3uk.mbn | 404 | 80 | VOLTE | OPENMKT | COMMERC` — outlives both a restage and a rild
+restart, so it keeps selecting the UK config for the BSNL SIM from a file that no longer
+claims it.
+
+What rebuilds those three `qcril_sw_mbn_*` tables is a **boot**. `/vendor/bin/init.qcom.sh`
+copies the vendor's pristine configs to `/data/vendor/radio/mbn-master` and drops a
+`copy_complete` marker beside it, both only at boot, and qcril rebuilds its selection tables
+from that master set. So the recovery is simply: reboot, then restage.
+
+Deleting or replacing the database is not the answer, and doing either leaves the phone
+worse off in a different way each time.
+
+Deleting it: **qcril never creates the emergency schema, and on this port nothing copies it
+in.** Vendor ships the populated file at `/vendor/radio/qcril_database/qcril.db`
+(98304 bytes), but with `qcril.db` missing rild simply makes an empty 4096-byte SQLite file
+and then logs `Operation failed 1 no such table: qcril_emergency_source_mcc_mnc_table` on
+every lookup — 39 of them in one boot. The emergency-number tables are gone with it, which
+matters here given the unrelated `EF_ECC` parse failure.
+
+Copying that vendor template over the live database — which is what I did next, on every
+restore attempt — is the subtler mistake, and it is what kept the restore failing. The
+template carries the emergency and operator schema but **none** of the `qcril_sw_mbn_*`
+tables, so each copy threw away exactly the selection tables qcril had just rebuilt during
+boot, and the following rild restart then had nothing to select from. Confirmed by
+inspecting a database after a clean boot with the copy step removed: all three tables
+present, `no such table` count 0, and subscription 0 selected `mcfg_sw/row.mbn` on the
+first try. `scripts/mcfg/restore-row.sh` no longer touches the database at all.
+
+Two dead ends recorded so no one re-runs them: clearing `/data/vendor/radio/copy_complete`
+does not force the database to be rebuilt (that marker belongs to the `mbn-master` copy),
+and `ctl.restart ril-daemon` versus `ctl.stop` + `ctl.start` makes no difference either —
+both were theories of mine that the evidence did not support.
+
+Worth knowing before editing any config's match list: the staged file is not the only
+place the mapping lives.
+
+ofono's APNs are provisioned by ofono, not by the MCFG, so `bsnlnet` and the MMS context
+were unaffected throughout.
+
+## The modem's IMS settings are correct; its IMS runtime is not there
+
+With the carrier-config class eliminated, the last question worth asking the modem directly
+was whether its IMS task is running at all. `scripts/qmi/qmiims.py sweep 0x20 0xa0` walks
+every message id in the `imss` (IMS Settings, service `0x12`, port `0x37`) space with an
+empty request and records the result code, which partitions the service cleanly:
+
+| result | ids | reading |
+|---|---|---|
+| success | 26 | `0x26 0x28 0x29 0x2a 0x34 0x36 0x37 0x39 0x3d 0x3f 0x40 0x41 0x44 0x45 0x48 0x4a 0x4b 0x53 0x54 0x56 0x57 0x58 0x5d 0x5e 0x63 0x64` |
+| error 3 (`INTERNAL`) | 34 | includes both `0x8f` (`set_ims_service_enabled`) and `0x90` (`get_ims_service_enable_config`) |
+| error 17 | 2 | `0x66 0x89` |
+| error 54 | 13 | setters called with no TLVs |
+| error 57 | 49 | not implemented in this firmware |
+
+So the "the modem's IMS task never started" hypothesis is **wrong**, and so is the milder
+"it does not implement these messages" — 26 messages answer, and the two that matter fail
+with `INTERNAL` rather than an unknown-message-id error, so their handlers exist and run.
+
+What the 26 answers say is that the modem's IMS *settings* are fully and correctly
+provisioned for this SIM (`scripts/qmi/imssdump.sh`):
+
+- `0x28` → `ims.mnc080.mcc404.3gppnetwork.org` — the modem has derived BSNL's IMS home
+  domain from the IMSI by itself. It knows exactly which network it should register to.
+- `0x26` → SIP port 5060.
+- `0x29` → the registration timer set: 1800 s expiry, 600 s subscription, T1 45 / T2 90 / TF 20.
+- `0x34` → the QoS and media parameters, MTU 1400.
+- `0x37` → three enable flags, all `1`.
+- `0x48` → the IMS PDN profile, APN `ims`.
+
+Every one of those is a read of stored configuration. Everything that fails is a query that
+would need a live IMS session layer to answer. The settings half of the modem's IMS stack is
+present and correct; the runtime half never comes up, and it will not say why — this is the
+same firmware that emits no F3 debug messaging at all, so there is no channel left to ask on.
+
+### The IMS bearer is not the trigger either
+
+The obvious remaining candidate was the PDN: perhaps the modem starts its IMS task only once
+the IMS APN is up, which on this port never happens by itself (see the open item about ofono
+not activating `context3`). `scripts/qmi/imsbearer.sh` activates it over D-Bus and re-runs
+the sweep. The context comes up properly — `rmnet_data2`, address `10.206.179.69` — and the
+sweep result is **byte-identical**: same 26 successes, same 34 `INTERNAL`s, same
+`0x8f`/`0x90`. The bearer is not the gate, and making ofono bring `context3` up
+automatically, while worth doing on its own merits, would not by itself produce VoLTE here.

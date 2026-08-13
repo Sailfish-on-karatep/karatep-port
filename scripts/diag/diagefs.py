@@ -19,11 +19,14 @@
 # to MEMORY_DEVICE_MODE with a non-zero peripheral mask (diag_switch_logging()
 # rejects an empty mask outright).
 
+import contextlib
 import fcntl
 import os
 import select
+import signal
 import struct
 import sys
+import time
 
 DIAG = "/dev/diag"
 
@@ -91,6 +94,65 @@ def hdlc_decode(frame):
     return bytes(out[:-2])       # drop the CRC
 
 
+def find_frame(buf, want_prefix):
+    """First frame in one read() from /dev/diag that starts with want_prefix.
+
+    Unescaping is a per-byte loop in Python and a raised F3 runtime mask can
+    deliver tens of thousands of frames per read, so frames are rejected on
+    their command code first: it is the first byte and is never an escaped
+    value.
+    """
+    if len(buf) < 8:
+        return None
+    data_type, num = struct.unpack_from("<ii", buf, 0)
+    if data_type != USER_SPACE_DATA_TYPE:
+        return None
+    off = 8
+    for _ in range(num):
+        if off + 4 > len(buf):
+            return None
+        ln, = struct.unpack_from("<i", buf, off)
+        off += 4
+        if ln <= 0 or off + ln > len(buf):
+            return None
+        for frame in buf[off:off + ln].split(b"\x7e"):
+            if not frame or frame[0] != want_prefix[0]:
+                continue
+            pkt = hdlc_decode(frame + b"\x7e")
+            if pkt.startswith(want_prefix):
+                return pkt
+        off += ln
+    return None
+
+
+class DiagInterrupt(Exception):
+    """Raised in place of a read that the driver would sleep in forever."""
+
+
+def _tick(_sig, _frame):
+    raise DiagInterrupt()
+
+
+@contextlib.contextmanager
+def interruptible(period=0.5):
+    """Make reads on /dev/diag give up instead of sleeping indefinitely.
+
+    diagchar_read() waits in wait_event_interruptible() and pays no attention
+    to O_NONBLOCK, and diagchar_poll() reports the device readable whenever the
+    driver has been woken rather than only when a batch is queued -- so
+    select() promises data that read() then blocks waiting for. A repeating
+    SIGALRM whose handler raises turns that block into an exception, which is
+    the only way to put a deadline on it.
+    """
+    old = signal.signal(signal.SIGALRM, _tick)
+    signal.setitimer(signal.ITIMER_REAL, period, period)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
 class Diag:
     def __init__(self):
         self.fd = os.open(DIAG, os.O_RDWR)
@@ -107,34 +169,19 @@ class Diag:
 
     def recv(self, want_prefix, timeout=4.0):
         """Read frames until one starts with want_prefix."""
-        deadline = select.select
-        import time
         end = time.time() + timeout
-        while time.time() < end:
-            r, _, _ = deadline([self.fd], [], [], max(0.05, end - time.time()))
-            if not r:
-                continue
-            buf = os.read(self.fd, 65536)
-            if len(buf) < 8:
-                continue
-            data_type, num = struct.unpack_from("<ii", buf, 0)
-            if data_type != USER_SPACE_DATA_TYPE:
-                continue
-            off = 8
-            for _ in range(num):
-                if off + 4 > len(buf):
-                    break
-                ln, = struct.unpack_from("<i", buf, off)
-                off += 4
-                if ln <= 0 or off + ln > len(buf):
-                    break
-                for frame in buf[off:off + ln].split(b"\x7e"):
-                    if not frame:
-                        continue
-                    pkt = hdlc_decode(frame + b"\x7e")
-                    if pkt.startswith(want_prefix):
-                        return pkt
-                off += ln
+        with interruptible():
+            while time.time() < end:
+                # The driver hands back one whole batch of frames per read and
+                # fails outright if the buffer cannot take it, which a raised
+                # F3 runtime mask makes routine, so ask for a megabyte.
+                try:
+                    buf = os.read(self.fd, 1 << 20)
+                except (DiagInterrupt, BlockingIOError):
+                    continue
+                pkt = find_frame(buf, want_prefix)
+                if pkt is not None:
+                    return pkt
         return None
 
     def efs(self, cmd, payload=b""):
