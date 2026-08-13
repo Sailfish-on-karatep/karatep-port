@@ -2024,3 +2024,76 @@ being brought up by ofono rather than by the modem's own DCM client, so its life
 match what the IMS stack expects; `CLIENT_PROVISIONING_ENABLE_PRESENCE` and the rest of item
 24's neighbours are still 0; and the registration may simply be failing at the core and
 retrying, which nothing on the AP side can see because this firmware emits no F3 messaging.
+
+## Correction again: the modem never reached REGISTERED, and now we know why
+
+The section above reads the modem's progression `qmi 0 -> 1 -> 2` as
+NOT_REGISTERED -> REGISTERING -> REGISTERED, decoding the enum from
+`qcril_qmi_ims_map_qmi_ims_reg_state_to_ims_reg_state`:
+
+```
+w0 == 0 -> 2      w0 == 1 -> 3      w0 == 2 -> 1      default -> 2
+```
+
+on the argument that a mapper's `default` falls to the safe value, so `2` must be
+NOT_REGISTERED. **That argument is wrong**, and the mapper alone could never have
+settled it — note that it cannot emit `0` for any input at all, which should have
+been the warning.
+
+ofono's own debug settles it without any disassembly. Turning on `OFONO_DEBUG=-d *`
+makes `ofono-binder-plugin-ext-qti` print the `QtiRadioRegInfo` struct it reads
+straight off the HIDL, and the registration runs this cycle, over and over:
+
+```
+ims:imsradio0: QtiRadioRegInfo state:2 radiotech:15 error_code:2147483647
+ims:imsradio0: QtiRadioRegInfo state:1 radiotech:15 error_code:408
+ims:imsradio0: QtiRadioRegInfo state:1 radiotech:15 error_code:0
+```
+
+`state` is `QTI_RADIO_REG_STATE` from `qti_radio_ext_types.h`, where
+`REGISTERED = 0, NOT_REGISTERED = 1, REGISTERING = 2`. State 2 carries
+`error_code 0x7fffffff` — the no-error sentinel — and state 1 carries **408**.
+So the correlation reads directly: **REGISTERING, then NOT_REGISTERED with SIP
+408.** State 0 never appears.
+
+Back-substituting through the mapper, `qmi 2 -> 1` means **qmi state 2 is
+NOT_REGISTERED**, not REGISTERED, and qcril's `default -> 2` is REGISTERING. The
+`0 -> 1 -> 2` progression was an attempt that failed, which is exactly consistent
+with the 408s and with both calls going CS.
+
+### What 408 is worth
+
+**SIP 408 is Request Timeout.** The modem built a REGISTER, sent it, and nothing
+came back. That retires the oldest standing claim in this document — that no SIP
+ever leaves the modem, that it is idle rather than refused. It is not idle any
+more. Everything up to and including the transaction layer now works:
+
+* the carrier config is accepted and selected (retargeted `rjil.mbn`);
+* `CLIENT_PROVISIONING_ENABLE_VOLTE` is set, through the legacy `0x53` tag `0x10`;
+* the IMS PDN comes up and the registration manager runs;
+* a REGISTER goes out over LTE.
+
+What fails is the round trip. The suspects, in the order the evidence points:
+
+**The P-CSCF is not consistently delivered.** One activation logged
+`qcril_data_util_fill_pcscf_addr: PCSCF Addresses : 61.2.220.137` — a real BSNL
+address — and later activations logged no `fill_pcscf_addr` line at all. A
+REGISTER with no P-CSCF, or one aimed at a stale address, times out exactly like
+this.
+
+**The IMS PDN is IPv4-only in practice.** ofono already requests both — context3's
+`Protocol` is `dual`, and `ipv4v6` is not even valid ofono spelling — but what
+comes back is an IPv4 address (`10.66.37.208/27`) and nothing but a link-local
+IPv6. Indian IMS cores are normally reached over IPv6, and the P-CSCF in PCO is
+usually an IPv6 address.
+
+**The bearer belongs to ofono, not to the modem.** On a stock Qualcomm stack the
+IMS PDN is brought up by the modem's own DCM client (`ims_qmi_dcm_client.c` is in
+this firmware) and SIP terminates inside the modem. Here ofono establishes it with
+`setupDataCall` and the AP gets the address. Whether the modem's IMS stack binds
+to a PDN owned that way is unverified, and the intermittent P-CSCF may be a
+symptom of it.
+
+Worth noting what is *not* implicated: the AP's routing table shows
+`61.2.220.137 via 192.168.68.1 dev wlan0`, which looks alarming but is irrelevant —
+modem-originated SIP never traverses the AP network stack.
