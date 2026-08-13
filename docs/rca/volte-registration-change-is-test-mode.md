@@ -1902,3 +1902,125 @@ that needs watching.
 
 An actual VoLTE call has not been placed yet. Registration is not the same as a working call:
 SRVCC, codec negotiation and the CS fallback path are all still untested.
+
+## Correction: the IMPU list was not proof, and the calls proved it
+
+The section above declares the modem registered on the strength of `imsa` message `0x20`,
+which returns
+
+```
+sip:+919487328324@ims.mnc080.mcc404.3gppnetwork.org
+tel:+919487328324
+```
+
+and reasons that because `EF_MSISDN` is unprogrammed — ofono's `SubscriberNumbers` is an empty
+array — the modem cannot know its own number, so the number must have come back in the
+`P-Associated-URI` of a `200 OK`. The number is correct for this SIM.
+
+That inference is wrong, and a call settled it: both an incoming and an outgoing call went out
+over CS, with **zero** `qipcall|ims_call|imsvt` matches anywhere in the radio log.
+
+The hole in the argument is the card. `QMI_UIM_GET_CARD_STATUS` on service `0x0b` (node 0,
+port 0x29) reports:
+
+```
+slot 1: app 0 type=2 (USIM)  state=7 (READY)     aid=a0000000871002ff49ffff89081500ff
+        app 1 type=5 (ISIM)  state=1 (DETECTED)  aid=a0000000871004ff49ffff89081500ff
+slot 2: app 0 type=2 (USIM)  state=7 (READY)     aid=a0000000871002ff49ffff89030900ff
+```
+
+**There is an ISIM**, and `EF_IMPU` on an ISIM holds exactly that sip:/tel: pair. The modem has
+a local source for the number and needs no network to report it. (The ISIM being `DETECTED`
+rather than `READY` argues it was never provisioned, which is suggestive but not conclusive —
+a non-provisioning session can read the file.) A second test was also inconclusive: the IMPU
+survived `Modem.SetProperty Online false`, but the modem was never confirmed to have detached.
+
+What `0x20` and `0x21` report is capability, not a registration binding. qcril's own reading
+was there to be checked and said so plainly: `ims_registered: 0`, alongside
+
+```
+qcril_qmi_voice_technology_updated: voice_rte 5, data_rte 5, ims_rte 0, will be considered 5
+```
+
+`ims_rte 0` is the value that decides the voice domain, and it is why every call went CS
+regardless of what the config layer reported. The network was never the obstacle —
+`voice_support_on_lte val 1` says BSNL advertises VoPS on this cell.
+
+## The port had been calling the wrong generation of the API all along
+
+`libril-qc-qmi-1.so` keeps a table of radio-config items, laid out as
+`{get_msg u64, set_msg u64, const char *name, item_id u64}`, and it appears **twice** — once
+per generation of the QMI IMS Settings API. `scripts/qmi/cfgmap.py` walks both (the host
+`objdump` cannot disassemble aarch64 here despite `readelf` reading the header, so
+`scripts/qmi/disasm.py` uses capstone):
+
+| item | name | legacy pair | modern pair |
+|---|---|---|---|
+| 24 | `CLIENT_PROVISIONING_ENABLE_VOLTE` | get `0x54` / set `0x53` | get `0x90` / set `0x8f` |
+| 25 | `CLIENT_PROVISIONING_ENABLE_VT` | get `0x54` / set `0x53` | get `0x90` / set `0x8f` |
+| 45 | `QIPCALL_MOBILE_DATA_ENABLED` | get `0x37` / set `0x36` | — |
+| 46 | `QIPCALL_VOLTE_ENABLED` | get `0x37` / set `0x36` | get `0x90` / set `0x8f` |
+| 47 | `QIPCALL_VT_CALLING_ENABLED` | get `0x37` / set `0x36` | get `0x90` / set `0x8f` |
+
+This is the vintage mismatch, in the binary rather than as a theory. `0x8f`/`0x90` answer
+`3 INTERNAL` because they are the *later* pair; `0x36`/`0x37` and `0x53`/`0x54` carry the same
+items and are among the 26 messages this modem has answered correctly all along. Every hunt for
+"the QMI call that enables VoLTE" was aimed at a door this firmware does not have, while the
+door it does have was in the working set the whole time.
+
+Reading both legacy getters split the problem in one shot:
+
+```
+0x37 -> 0x11=1 0x12=1 0x13=1        mobile_data=1 volte=1 vt=1
+0x54 -> 0x11=0 0x12=0 0x13=0 ...    volte=0 vt=0 presence=0 wifi_call=0
+```
+
+The qipcall layer was already enabled. **Client provisioning was not** — item 24, the flag
+Android's telephony framework writes when the user turns the VoLTE switch on, and which a
+handset that does not recognise the carrier never writes at all. On BSNL, whose 4G postdates
+most shipped carrier configs, the switch is simply never offered.
+
+`scripts/qmi/setprovvolte.py` writes it. The set request's TLV tag is not in the table, so it
+tries the plausible ones and lets the read-back decide; **tag `0x10`, one byte** is the one the
+modem takes:
+
+```
+before:  volte=0 vt=0 presence=0 wifi_call=0 wifi_roam=1 wifi_pref=1
+set tag 0x11/1B -> result=(0, 0)     accepted, changed nothing
+set tag 0x11/4B -> result=(1, 1)     rejected
+set tag 0x10/1B -> result=(0, 0)     accepted
+after:   volte=1 ...
+```
+
+## What that produced, and what is still wrong
+
+The modem's IMS state machine came alive. It now emits real registration-status *indications* —
+pushed by the modem, not read back from config — over LTE:
+
+```
+qcril_qmi_imsa_reg_status_ind_hdlr: ims_registered: 1   ims_registration_network: 14
+qcril_qmi_imsa_reg_status_ind_hdlr: ims_registered: 0   ims_registration_network: 14
+qcril_qmi_imsa_reg_status_ind_hdlr: ims_registered: 1   ims_registration_network: 14
+qcril_qmi_imsa_reg_status_ind_hdlr: ims_registered: 2   ims_registration_network: 14
+```
+
+and `VOIP service STATUS 2` appears for the first time. This needs the IMS bearer up: with
+ofono's `context3` inactive nothing happens, and with it active (`rmnet_data0`,
+`10.137.251.97/30`) the indications start. That reverses the earlier finding that activating the
+IMS PDN changes nothing — it was true under `row_v61`, before the modem had a config it would
+accept, and it is not true now. Task #22 is therefore load-bearing, not cosmetic.
+
+It does not settle. The registration oscillates `1 → 0 → 1 → 2` rather than holding, `ims_rte`
+stays `0`, `voice_radio_tech` stays `1`, and calls still go CS. So the sequence is understood
+and the last gate is not yet open:
+
+1. carrier config the modem accepts — **done**, via the retargeted Jio config;
+2. IMS bearer up — **done**, by activating `context3` by hand;
+3. client provisioning VoLTE enabled — **done**, via legacy `0x53` tag `0x10`;
+4. registration holding, `ims_rte` = 14, voice over IMS — **not yet**.
+
+Why it drops is the open question. Candidates, in the order worth testing: the bearer is
+being brought up by ofono rather than by the modem's own DCM client, so its lifetime does not
+match what the IMS stack expects; `CLIENT_PROVISIONING_ENABLE_PRESENCE` and the rest of item
+24's neighbours are still 0; and the registration may simply be failing at the core and
+retrying, which nothing on the AP side can see because this firmware emits no F3 messaging.
