@@ -2942,3 +2942,54 @@ provides, rather than a misconfiguration. It is also directly checkable against
 the reference handset that does VoLTE on this SIM: if it registers an IMS SMS
 transport, the network supports it and something here still differs; if it does
 not, this path is a dead end and `ims_rte` has to be reached another way.
+
+## PS_PREFERRED stabilises the service state, and the call is still CS
+
+`sms_domain_pref = 3` (PS_ONLY) made the transport indication fire but left the
+IMS service state flapping -- SMS over IMS failing repeatedly churns the
+registration. `sms_domain_pref = 1` (PS_PREFERRED) advertises the capability and
+falls back to CS instead of failing, and it settles completely. Sampled every
+20 s for 100 s:
+
+```
+imsa 0x21: 10=2 11=2 12=2 13=1 14=1 15=1 16=2 17=1     (unchanged, every sample)
+```
+
+Every service field reads 2, including `0x12`, which had been 0 in every
+measurement before today's config change. This is the healthiest the modem's IMS
+state has been at any point in the investigation.
+
+An incoming call placed in that state still came over CS. Filtered to the
+running rild and the minute of the call:
+
+```
+call_mode 2          CS
+is cs call: 1
+voice rte 0, 2, 5    dropped off LTE
+csfb markers 7
+ims_rte 0
+```
+
+A methodology note, because it bit twice: `logcat -f` writes the whole ring
+buffer to the file, so an unfiltered count picks up hours of history from
+previous rild instances. The first pass at this call reported 71 CSFB markers and
+`voice rte 3`; almost all of that was from 14:18, a different pid. Filtering to
+the current rild pid and the call's own minute gives the 7 above. The conclusion
+is the same either way here, but the numbers were not.
+
+### For an incoming call it is the network that chooses
+
+That is what makes this result informative rather than just another negative.
+The UE cannot force an MT call onto IMS -- BSNL paged over CS, which means the
+IMS core does not hold a voice-capable registration for this subscriber, even
+though the UE is registered (IPsec SA established, `QtiRadioRegInfo state:0`).
+
+So the registration exists but is not being treated as MMTEL-voice-capable by
+the core. The next thing worth knowing is what the reference handset's REGISTER
+advertises that ours does not -- the `+g.3gpp.icsi-ref` media feature tag in the
+Contact header is the specific candidate, and `qp_ims_voip_config` is where this
+modem gets it from.
+
+Note also that the service status, stable at idle, oscillates again during the
+call (`VOIP: valid -> not valid -> valid -> not valid`), so "stable" holds only
+while nothing is happening.
