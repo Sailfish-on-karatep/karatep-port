@@ -2295,3 +2295,80 @@ This port does the first -- that is what `setServiceStatus` is -- and has no
 equivalent of the second. `turnOnIms()` is `TelephonyManager.enableIms()`, and
 nothing in ofono, `ofono-binder-plugin` or our `ext-qti` fork calls anything like
 it.
+
+## Traced: what actually decides the domain, and why it is stuck
+
+`ims_rte` is written in exactly one function, the static
+`qcril_qmi_nas_update_ims_rte` (found by its own log string at `0xefa245`, its
+body around `0x4ff550`). It branches on a single cached field and nothing else:
+
+```
+004ff5dc  ldr   w9, [x8, #0x624]      ; nas_cached_info + 0x624
+004ff5e0  cbz   w9, #0x4ff600
+          ; non-zero:
+004ff5f4  str   w10(=3), [x9, #0x434] ; ims_rte = 3
+004ff5f8  str   w8(=1),  [x9, #0x6d0] ; confidence = 1
+          ; zero:
+004ff60c  str   wzr,     [x9, #0x434] ; ims_rte = 0
+004ff610  str   w8(=4),  [x9, #0x6d0] ; confidence = 4
+```
+
+We read `ims_rte 0 confd 4`, so that field is zero, and it is the whole answer.
+
+Scanning every store to `nas_cached_info + 0x624` gives two: one zeroing it in
+`qcril_qmi_nas_init`, and exactly one writer --
+
+```
+0x0062c8a8  str w9, [x8, #0x624]  in qcril_qmi_nas_set_registered_on_ims + 0x640
+```
+
+and resolving the PLT (these calls go through it, so a direct `bl` scan finds
+nothing) gives that function exactly one caller in the whole library:
+
+```
+qcril_sms_process_transport_nw_reg_info_ind
+```
+
+**qcril learns "registered on IMS" from the WMS service's transport
+network-registration indication -- from SMS, not from IMSA.** Nothing else in
+`libril-qc-qmi-1.so` can set it. And that indication has never fired on this
+device: zero occurrences in the radio log, alongside zero WMS activity of any
+kind.
+
+The reason it never fires is in our own code. `qti_ims.c` had exactly one
+`setServiceStatus` call site and it enabled only `QTI_RADIO_SERVICE_TYPE_VOIP`.
+The SMS service over IMS was never enabled, so the SMS transport never registers,
+so the indication never comes, so `registered_on_ims` stays 0, so `ims_rte` stays
+0, so every call goes CS. Android does not make this mistake: `ImsManager` builds
+one `CapabilityChangeRequest` covering voice *and* SMS and sends it in a single
+`changeMmTelCapability()`.
+
+### The fix, and an honest result
+
+`ofono-binder-plugin-ext-qti` commit `6fbbcf8` adds the second call. Built and
+installed, ofono now sends both -- `Setting service 0 status 2` (SMS) and
+`Setting service 1 status 2` (VOIP) -- and the HAL answers both:
+
+```
+imsradio0< [0000000c] 9 setServiceStatus
+imsradio0< [0000000d] 9 setServiceStatus
+imsradio0> [0000000c] 6 setServiceStatus
+imsradio0> [0000000d] 6 setServiceStatus
+```
+
+**It has not moved `ims_rte`.** The transport indication still has not fired, and
+the reason is visible: qcril logs no `request_set_ims_srv_status` at all for these
+calls. The newest such line is from 14:14:08, while the radio log is current to
+the second. So on this pass the HIDL transaction completes and qcril never
+processes it -- the "accepted and dropped" behaviour that the earlier section
+retired on the strength of the 14:14 evidence.
+
+Both observations are real, which means the correction earlier in this document
+was too broad: `setServiceStatus` is *sometimes* processed by qcril and sometimes
+swallowed at the HAL, and what distinguishes the two is not yet known. That is
+the next thing to pin down, because the mechanism behind it is now fully mapped
+and only this last link is unreliable.
+
+Current state, with the bearer held up by the keeper: IMS reaches
+`QtiRadioRegInfo state:0`, both services are requested, `ims_rte` is still 0,
+and calls still go CS.
