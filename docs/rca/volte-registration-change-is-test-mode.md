@@ -2227,3 +2227,71 @@ as `updateVolteFeatureValue` -> `changeMmTelCapability(request)` -> `turnOnIms()
 two distinct modem actions where this port currently does only the first.
 `turnOnIms()` is `TelephonyManager.enableIms()`, and nothing in the ofono stack
 has an equivalent.
+
+## The modem decides, and it decides CS
+
+Holding the IMS bearer up with a keeper loop (`scripts/qmi/imskeeper.sh`) removes
+the last confound: the bearer is present, IMS reaches `state:0`, and a call is
+placed. It still goes CS, and the handset drops from 4G to 2G for the duration.
+
+The line that says it plainly:
+
+```
+qcril_qmi_voice_is_call_has_ims_audio: qcril_qmi_voice_info.jbims: 1, is cs call: 1
+```
+
+**`is cs call: 1`.** ofono queued `QCRIL_EVT_IMS_SOCKET_REQ_DIAL`, qcril accepted it
+(`DIAL CALL RESP : ril_err=0 ... result 0`), and the modem set the call up on CS
+anyway. This is not ofono choosing the wrong path and not qcril refusing; it is
+the modem's own domain selection.
+
+### The bearer teardown loop, which masked this for a long time
+
+Before the keeper, every measurement was contaminated by a self-sustaining loop:
+
+1. a call causes CSFB, dropping the UE to 2G/3G;
+2. the CSFB tears down the IMS PDN and IMS deregisters;
+3. ofono never re-activates `context3`, so IMS stays down;
+4. the next call therefore has no IMS either, and falls back again.
+
+The registration was never "unstable" -- its bearer was being removed and not
+replaced. That is why five minutes of idle sampling showed `context3 Active:
+false` with no registration activity at all, and it makes task #22 load-bearing
+rather than cosmetic. `scripts/qmi/imskeeper.sh` is a test harness for holding
+the variable still; the real fix belongs in ofono.
+
+### Everything else is verified correct
+
+Not inferred -- read back from the modem or from qcril's own logs:
+
+| layer | evidence |
+|---|---|
+| carrier config | retargeted `rjil.mbn` selected for SUB0 |
+| client provisioning VoLTE | `imss 0x54` tlv 0x11 = 1 |
+| qipcall VoLTE | `imss 0x37` tlv 0x12 = 1 |
+| P-CSCF | `imss 0x26` tlv 0x12 = `61.2.220.137`, reachable over the bearer at 57 ms |
+| voice domain preference | 3 = PS_PREFERRED, `ue_usage_setting` 0 = voice-centric |
+| VoPS from the network | `voice_support_on_lte val 1` |
+| `setServiceStatus` | type VOIP(1), status ENABLED(2), one accTechStatus entry naming LTE; qcril logs calltype 0 status 2, `qmi send async res 0` |
+| IMS availability per qcril | `qcril_qmi_nas_is_ims_available: is_available 1` |
+| IMS registration | `QtiRadioRegInfo state:0` |
+
+The `ext-qti` `setServiceStatus` implementation was re-checked against
+`qti_radio_ext_types.h` and is right: `QTI_RADIO_STATUS_ENABLED` really is 2 (the
+enum is DISABLED/PARTIALLY_ENABLED/ENABLED/NOT_SUPPORTED/INVALID, not a
+three-value one), `QTI_RADIO_SERVICE_TYPE_VOIP` is 1, and the accTechStatus
+vector carries exactly one LTE entry.
+
+### What is left
+
+One value never moves: `nas_cached_info.ims_rte` is `0`, with confidence 4 -- a
+settled belief, not a missing one -- even while `is_ims_available` is 1 and the
+registration reads REGISTERED. That is the input to qcril's voice-domain
+decision, and it is the last thread.
+
+The structural suspect is the gap named earlier from `ImsManager.java`: stock
+Android performs `changeMmTelCapability(request)` **and then** `turnOnIms()`.
+This port does the first -- that is what `setServiceStatus` is -- and has no
+equivalent of the second. `turnOnIms()` is `TelephonyManager.enableIms()`, and
+nothing in ofono, `ofono-binder-plugin` or our `ext-qti` fork calls anything like
+it.
