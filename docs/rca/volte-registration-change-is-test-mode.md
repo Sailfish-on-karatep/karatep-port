@@ -3278,3 +3278,57 @@ condition that returns before the flag is ever consulted. Tracing that path is
 the next concrete piece of work, and until it is done the claim that `ims_rte`
 is fed by the SMS transport should be treated as unproven rather than
 established.
+
+## SMS over IMS works. Only the acknowledgement is missing.
+
+Three texts arrived while the handset's UI sat at "Sending...". ofono dispatched
+exactly three messages over the IMS path, and their PDU lengths identify them
+precisely:
+
+| message | chars | 7-bit packed UD | predicted `pdu_len` | observed |
+|---|---|---|---|---|
+| `Oooo` | 4 | 4 | 18 | 18 |
+| `Ok hi` | 5 | 5 | 19 | 19 |
+| `\nHello!` | 7 | 7 | 21 | 21 |
+
+14 bytes of SMS-SUBMIT header -- SMSC, PDU type, MR, a 12-digit destination,
+PID, DCS, UDL -- plus the packed user data. Three predictions, three exact hits.
+
+They were **not** CS. `ims:Sending SMS` is the ext-qti plugin's own log line from
+`qti_ims_sms_send`, which hands the PDU to the IMS HAL; a CS message goes through
+ofono's ordinary RIL SMS path and never produces an `ims:` line. Three dispatched
+over IMS, three delivered. The rest never left -- they queued behind the stalled
+ones.
+
+**So the IMS data path carries traffic end to end.** That retires the theory
+built earlier this session that every IMS session-layer request fails after
+registration: the SMS MESSAGE transaction completes. Whatever is wrong with voice
+is specific to voice.
+
+### Where the acknowledgement is lost
+
+`qti_ims_sms_send` completes ofono's callback from exactly one place:
+
+```c
+guint id = qti_radio_ext_send_ims_sms(self->radio_ext, smsc, pdu, pdu_len,
+    msg_ref, flags, qti_ims_sms_result_request_response, ...);
+```
+
+`qti_ims_sms_result_request_response` fires on the HAL's **response** to
+`sendSms`, and it is the only thing that calls `req->complete(...)`. That
+function logs `result: %d` on every invocation, and **no such line appears in any
+capture** -- while `ims:Sending SMS: pdu_len=...` appears three times.
+
+So the request goes to the IMS HAL, the modem sends the message, the network
+delivers it, and the HAL never answers the binder call. ofono's send callback is
+never invoked, the UI stays at "Sending...", and the submit queue behind it
+stalls -- which is why the later messages never went at all.
+
+The plugin's report side is not the problem and is already wired up: ofono logs
+`Adding SMS report handler` and `Processing queued SMS reports, queue_length=0`,
+so it is listening and nothing is arriving.
+
+This is the same shape as the `setServiceStatus` behaviour recorded earlier -- a
+request accepted by the IMS HAL whose response never comes back -- and it is now
+the best-localised bug in this whole investigation: a working data path with a
+missing completion.
