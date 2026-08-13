@@ -3042,3 +3042,67 @@ Also worth noting for the port's own architecture: Android has an entire
 operator database driving these values, and ofono has none. Several things
 chased through this document as device bugs are, on the Android side, simply
 entries in a carrier config that ships with the OS.
+
+## What the reference stack actually does, and what this port does not have
+
+The Xiaomi's radio log is readable over adb without root, which makes it a usable
+reference for the whole IMS bring-up. Two things it settles and one it does not.
+
+### SMS over IMS really is granted to this subscriber
+
+```
+ImsSmsDispatcher [0]: onImsProgressing imsRadioTech=1
+ImsSmsDispatcher [0]: onImsConnected  imsRadioTech=1
+```
+
+Android's SMS-over-IMS dispatcher connects. Together with
+`imssms.sms_over_ims_supported_bool = true` in the carrier config, that is two
+independent confirmations that BSNL offers it. Our modem answering
+`set_registered_on_ims: registered: 0` is therefore a device-side failure, and
+the `ims_rte` route to VoLTE stays open.
+
+Alongside it, `isImsRegistered = true` and `getImsRegistrationTechnology = 0`
+(LTE) for the subscription with the SIM in it.
+
+### The reference is a generation newer, so it is not a like-for-like guide
+
+```
+qcril_qmi_radio_config_imss_set_ims_new_config_for_default: .. Set config useragent ...
+```
+
+The Xiaomi (M2012K11AI, Android 13) drives the **new** config path -- the `_v02`
+family whose counterparts on our modem answer `INTERNAL`. It also runs its own
+`XIAOMI_QCRIL` hook layer. So its QMI-level sequence cannot be copied across;
+what transfers is the framework-level shape and the operator values, not the
+message ids.
+
+### The layer this port does not have at all
+
+The working stack runs `ImsPhone`, `ImsPhoneCallTracker`, `ImsManager`,
+`ImsProvisioningController` and `ImsSmsDispatcher` in the framework, over
+`com.qti.phone` -- QTI's `ImsService` implementation -- with
+`org.codeaurora.internal.IExtTelephony` beside it. ofono replicates exactly one
+decision from that stack, `binder_voicecall_can_ext_dial()`, and this port has
+demonstrated that the decision itself works: the dial does go out over
+`imsradio0`.
+
+What has no equivalent here is the **operator database**. Android ships a
+BSNL-specific carrier config -- SIP timers, MTU, IPsec algorithms, supported RATs
+for SMS over IMS, registration expiry, feature-tag allow lists -- and ofono has
+nothing of the kind. Several things chased through this document as device bugs
+are, on the Android side, entries in a file that ships with the OS. The IMS SMSC
+corrected earlier is one example: Android would never have had it wrong, because
+the config supplies it.
+
+That reframes the remaining work. The next candidate is a plain mismatch against
+that database rather than another layer of the control path:
+
+```
+ims.ipv4_sip_mtu_size_cellular_int = 1500     this modem: 1300, and the IMS
+                                              bearer itself comes up at mtu 1300
+```
+
+A REGISTER carrying a full feature-tag set inside IPsec is a large packet, and an
+undersized SIP MTU is a well-known cause of registrations that establish and then
+behave oddly. It is also directly settable through the carrier config, the same
+way `sms_domain_pref` was.
