@@ -2783,3 +2783,49 @@ written only when `qcril_sms_process_transport_nw_reg_info_ind` fires, and that
 indication has still never fired once. A UE told to register SMS over IMS
 against another operator's SMSC is a plausible reason for that, and it is a value
 this port introduced rather than one the device came with.
+
+## The SMSC was wrong and is now fixed, and it was not the trigger
+
+`/nv/item_files/ims/qp_ims_sms_config` is 582 bytes with this layout:
+
+| offset | width | contents |
+|---|---|---|
+| 0x000 | 128 | SMSC address, was `10138` (Reliance's) |
+| 0x080 | 1 | 0x01 |
+| 0x081 | 128 | `+g.3gpp.smsip` |
+| 0x101 | 65 | `0x00000400` |
+| 0x142 | 1 | 0x04 |
+| 0x245 | 1 | 0x01 |
+
+The SMSC came from the retargeted Jio config and is simply wrong for this SIM.
+`scripts/qmi/efswrite.py` adds the write side to the DIAG EFS2 client (diagefs.py
+defined `EFS2_WRITE` but only ever read), rewriting the item in place at its
+existing length -- it refuses to write a value of a different size, so nothing
+can be truncated. BSNL's own SMSC, taken from the SIM via ofono
+(`MessageManager.ServiceCenterAddress` = `+919442099997`), now sits in that
+field, verified by read-back.
+
+**It changed nothing.** After a forced re-registration the SMS transport
+indication count is still 0, exactly as it has been all day, and `ims_rte` is
+unchanged. IMS itself still registers (`QtiRadioRegInfo state:0`).
+
+The fix is worth keeping -- it removes a contamination this port introduced, and
+a UE advertising another operator's SMSC is wrong regardless -- but it is not
+what gates the SMS transport.
+
+### And the SMS service cannot be enabled the way voice was
+
+Worth recording, because it closes off the obvious follow-up. The client
+provisioning items are ENABLE_VOLTE (24), ENABLE_VT (25), ENABLE_PRESENCE (26),
+WIFI_CALL (27), WIFI_CALL_ROAMING (28), WIFI_CALL_PREFERENCE (29),
+ENABLE_VOWIFI (85), ENABLE_RTT (91); the qipcall items are mobile data, VoLTE,
+VT calling, ports and codecs. **Neither family has an SMS entry.** Since
+`setServiceStatus` sends only QMI `0x53` and `0x36`, adding
+`SERVICE_TYPE_SMS` to the ofono side -- the change made in `ext-qti 6fbbcf8` --
+cannot enable SMS over IMS either, whatever happens to the HAL call. That commit
+is harmless and matches what Android does, but it is not a fix.
+
+What is left governing SMS over IMS is `SMS_OVER_IP` (config item 32, already 1),
+the SMSC just corrected, and whatever makes qcril's WMS client subscribe to the
+transport registration indication in the first place. The last of those is
+unexamined and is the only remaining candidate.
