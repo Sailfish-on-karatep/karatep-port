@@ -2097,3 +2097,133 @@ symptom of it.
 Worth noting what is *not* implicated: the AP's routing table shows
 `61.2.220.137 via 192.168.68.1 dev wlan0`, which looks alarming but is irrelevant —
 modem-originated SIP never traverses the AP network stack.
+
+## The call goes CS anyway, and three long-standing claims turn out to be wrong
+
+ofono now dials over IMS. With registration at `state:0` its debug shows the ext
+path being taken, the HAL accepting, and the call progressing:
+
+```
+ims:Dialing (ext) +91XXXXXXXXXX
+imsradio0< [00000014] 2 dial
+ims:qti_ims_call_result_response 0
+status: dialing (2) -> alerting (3)
+```
+
+That is `qti_ims_call_dial` over `IImsRadio`, not `RIL_REQUEST_DIAL`. It is still
+not a VoLTE call. The handset's 4G indicator drops for the duration of every
+call and returns when it ends, and the log agrees:
+
+```
+14:19:05.975  qcril_qmi_voice_set_audio_call_type: Set audio call_type as VOICE
+14:19:05.975  convert_call_mode_to_radio_tech_family: entered call_mode 2
+14:19:06.005  qcril_qmi_nas_invalidate_data_snapshot_in_case_of_csfb_in_alerting_state
+```
+
+`call_mode 2` is CS and there is an explicit **CSFB in alerting state**. ofono
+asks for an IMS call; the modem sets one up on CS. Worth recording how this was
+nearly missed: the same capture counted 28 `csfb` markers and `voice rte 2`
+alongside the ofono lines, and those were waved through as routine noise because
+the ofono lines said what was wanted. The handset's own indicator was the
+correction.
+
+### setServiceStatus is not dropped any more
+
+This document has said since task #13 that `setServiceStatus` is *"accepted by the
+vendor HAL and silently dropped -- the binder transaction completes and qcril
+logs nothing at all"*. That is no longer true, and the source comment in
+`qti_ims.c` saying so should be read as historical:
+
+```
+qcril_qmi_imss_request_set_ims_srv_status: has_calltype: 1, calltype: 0
+qcril_qmi_imss_request_set_ims_srv_status: has_status: 1, status: 2
+qcril_qmi_imss_request_set_ims_srv_status: .. qmi send async res 0
+qcril_process_event: Exit QCRIL_EVT_IMS_SOCKET_REQ_SET_SERVICE_STATUS, err_no 0
+```
+
+calltype 0 is VOICE, status 2 is enabled, and the QMI send succeeds.
+
+### qcril already picks the right generation of the API
+
+The obvious follow-on guess -- that `setServiceStatus` lands on the modern
+`0x8f` and dies of `INTERNAL` -- is also wrong. qcril carries both generations
+side by side (`qcril_qmi_imss_request_set_ims_srv_status` and
+`..._v02`, `set_ims_config` and `_v02`, `set_ims_registration` and `_v02`) and
+selects between them, with `qcril_qmi_imss_get_modem_version` to decide.
+At runtime it uses the **legacy** ones, every time; no `_v02` symbol appears in
+any log. The vintage split is real and qcril handles it correctly on its own.
+
+It also prints QMI message ids in hex with no prefix, which is worth knowing when
+reading these logs:
+
+```
+qcril_qmi_imss_command_cb: .. msg id 53   -> 0x53 set client provisioning
+qcril_qmi_imss_command_cb: .. msg id 36   -> 0x36 set qipcall config
+qcril_qmi_imss_command_cb: .. msg id 21   -> 0x21 set reg mgr config
+```
+
+all answering `ril_err: 0, qmi res: 0`.
+
+### The test-mode trap is not biting
+
+The trap this document is named after -- ofono's registration request mapping to
+QMI "set IMS test mode" rather than to a registration -- is still in the code
+path, but harmless as configured:
+
+```
+qcril_qmi_imss_set_ims_test_mode_enabled: ims_test_mode_enabled = FALSE
+```
+
+and NV `/nv/item_files/ims/qp_ims_test_mode` reads `00000000`.
+
+What that request *does* do is more interesting: it drives the voice domain
+preference.
+
+```
+qcril_qmi_imss_request_set_ims_registration: has_state: 1, state: 1
+qcril_qmi_imss_request_set_ims_registration: Need to change voice domain pref? Yes
+qcril_qmi_nas_set_voice_domain_preference: voice_domain_pref : 3
+```
+
+### Everything on the configuration side is now correct
+
+Which is the point this leaves us at. Checked directly, not inferred:
+
+| setting | value | wanted |
+|---|---|---|
+| `voice_domain_pref` (NV and QMI NAS) | 3 = PS_PREFERRED | 3 |
+| `ue_usage_setting` | 0 = voice-centric | 0 |
+| client provisioning VoLTE (`imss 0x54`) | 1 | 1 |
+| qipcall VoLTE (`imss 0x37`) | 1 | 1 |
+| reg-mgr P-CSCF (`imss 0x26`) | 61.2.220.137 | set |
+| `setServiceStatus` | calltype 0, status 2, res 0 | delivered |
+| IMS registration | reaches `state:0` | registered |
+
+and yet `ims_rte` stays 0, `VOIP service STATUS` flaps 2 -> 0 -> 2 -> 0, and
+calls go CS. The remaining fault is that the registration does not *hold* long
+enough or completely enough for the modem to treat IMS voice as in service. The
+P-CSCF having to be written by hand is the most likely reason: PCO delivers it on
+some IMS PDN activations and not others, so each re-registration is a coin toss.
+
+### No prior art
+
+Per the project rule that a zero-hit search is a finding, the `#sailfishos-porters`
+archive over eleven years:
+
+| query | hits |
+|---|---|
+| `client provisioning` | 0 |
+| `pcscf` | 0 |
+| `IImsRadio` | 16 lines, May 2026 |
+| `qti_ims_call` | 5 lines, May 2026 |
+
+There is also no public Qualcomm documentation for QMI IMS Settings (0x12) or
+IMSA (0x21); neither is in libqmi. Everything here was reconstructed from the
+blob's own tables and from the kernel's `ipa_qmi_service_v01.h` error enum.
+
+The Android side that this modem was built for is in the tree and is the best
+available specification: `frameworks/opt/net/ims/ImsManager.java` gives the order
+as `updateVolteFeatureValue` -> `changeMmTelCapability(request)` -> `turnOnIms()`,
+two distinct modem actions where this port currently does only the first.
+`turnOnIms()` is `TelephonyManager.enableIms()`, and nothing in the ofono stack
+has an equivalent.
