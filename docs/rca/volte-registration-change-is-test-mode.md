@@ -2490,3 +2490,63 @@ So the next step is a narrower ofono debug selector rather than `-d *`, so that
 `Setting service N status` and the `imsradio` transactions are actually
 recorded. Until then it cannot be said whether ofono is sending setServiceStatus
 this boot at all, and that is the one fact the whole remaining chain turns on.
+
+## Unblocked: ofono sends it, the HAL answers it, qcril never sees it
+
+Replacing `OFONO_DEBUG=-d *` with `-d *qti*,*binder_ims*,*binder_voicecall*`
+(and disabling journald's rate limit for the test) makes the decisive lines
+survive. They are unambiguous:
+
+```
+ims:Setting service 0 status 2          <- SMS
+imsradio0< [0000000c] 9 setServiceStatus
+ims:Setting service 1 status 2          <- VOIP
+imsradio0< [0000000d] 9 setServiceStatus
+ims:imsradio0 IMS services enabled
+imsradio0> [0000000c] 6 setServiceStatus
+imsradio0> [0000000d] 6 setServiceStatus
+```
+
+Both services, on both slots, every call answered by the HAL. And on the qcril
+side, in the same window:
+
+```
+IMS socket events: 0
+```
+
+Not one `QCRIL_EVT_IMS_SOCKET_REQ_*` of any kind. So the `IImsRadio`
+implementation accepts `setServiceStatus`, returns success, and does not forward
+it to qcril. The SMS fix in `ext-qti 6fbbcf8` is being delivered correctly and
+dying at the same place the VOIP one does.
+
+This vindicates the oldest note in this document -- that the HAL "accepts the
+call and drops it" -- and retracts the correction made earlier today which
+declared that note historical. The one window where qcril did log
+`request_set_ims_srv_status` (14:14:08) is the anomaly, not the rule, and what
+made that window different is still unknown. It is the only evidence that this
+path can work at all.
+
+Registration in the same window is back to failing the way it did before the
+P-CSCF was written by hand:
+
+```
+QtiRadioRegInfo state:2 error_code:2147483647   REGISTERING
+QtiRadioRegInfo state:1 error_code:408          NOT_REGISTERED, timeout
+```
+
+with `imss 0x26` still holding `61.2.220.137`. So writing the P-CSCF into the
+reg-mgr config is not sufficient on its own either; the one registration that
+reached `state:0` did so under conditions that have not been reproduced since.
+
+### Standing on this
+
+Two things are now solidly measured rather than inferred, and both are negative:
+
+* ofono is doing its part -- the ext plugin is loaded, both IMS services are
+  requested, the dial path is the IMS one;
+* the vendor `IImsRadio` implementation is where the chain breaks, silently.
+
+Everything below that -- the config-item tables, the legacy/modern message
+split, the `ims_rte` writer chain ending at the SMS transport indication -- is
+mapped and correct, and none of it can be exercised while the HAL swallows the
+one call that would start it.
