@@ -2993,3 +2993,52 @@ modem gets it from.
 Note also that the service status, stable at idle, oscillates again during the
 call (`VOIP: valid -> not valid -> valid -> not valid`), so "stable" holds only
 while nothing is happening.
+
+## The reference handset settles it: BSNL does support SMS over IMS
+
+The same SIM in a Xiaomi M2012K11AI on Android 13 reports IMS **Registered**, with
+VoLTE, video calling and the UT interface available, VoWiFi unavailable, and
+calls staying on LTE/VoLTE. So the subscriber is VoLTE-provisioned and the core
+does hold a voice-capable registration for it -- confirming the network is not
+the obstacle.
+
+More usefully, Android carries an operator carrier config for BSNL that this
+port has no equivalent of, and `adb shell dumpsys carrier_config` prints it. It
+is saved as `docs/reference/bsnl-carrier-config-android13.txt`. The decisive
+lines:
+
+```
+imssms.sms_over_ims_supported_bool          = true
+imssms.sms_over_ims_supported_rats_int_array = [3, 5]     EUTRAN, IWLAN
+imssms.sms_over_ims_format_int              = 0           3GPP
+imssms.sms_csfb_retry_on_failure_bool       = true
+config_disable_send_sms_over_ims            = false
+carrier_volte_available_bool                = true
+carrier_volte_provisioning_required_bool    = false
+```
+
+**BSNL supports SMS over IMS on LTE.** That closes the question the previous
+section left open: our `qcril_qmi_nas_set_registered_on_ims: registered: 0` is
+not the network declining a service it does not offer. It is a device-side
+failure, and the path is worth chasing.
+
+### Values worth comparing against our modem
+
+| setting | BSNL config | this modem |
+|---|---|---|
+| `ims.sip_server_port_number_int` | 5060 | 5060 (`imss 0x26`) |
+| `ims.sip_over_ipsec_enabled_bool` | true | ESP observed on the bearer |
+| `ims.ipv4_sip_mtu_size_cellular_int` | 1500 | 1300 (`imss 0x39`) |
+| `ims.registration_expiry_timer_sec_int` | 600000 | 1800 s (`imss 0x29`) |
+| `ims.sip_timer_t1_millis_int` | 2000 | 45 (`imss 0x29`) |
+| `ims.sip_timer_t2_millis_int` | 16000 | 90 (`imss 0x29`) |
+| `ims.sip_preferred_transport_int` | 2 (dynamic UDP/TCP) | not yet read |
+
+The timer units clearly differ between the two representations and should not be
+copied across naively, but the SIP MTU is a plain mismatch -- 1300 against 1500 --
+and the IMS bearer itself comes up with `mtu 1300`.
+
+Also worth noting for the port's own architecture: Android has an entire
+operator database driving these values, and ofono has none. Several things
+chased through this document as device bugs are, on the Android side, simply
+entries in a carrier config that ships with the OS.
