@@ -3106,3 +3106,96 @@ A REGISTER carrying a full feature-tag set inside IPsec is a large packet, and a
 undersized SIP MTU is a well-known cause of registrations that establish and then
 behave oddly. It is also directly settable through the carrier config, the same
 way `sms_domain_pref` was.
+
+## Where this session ends
+
+### The SIP MTU is the find
+
+`qp_ims_sip_extended_0_config` decoded against the reference handset's BSNL
+carrier config is a field-for-field match, in the same units (milliseconds --
+the earlier "units differ" caution does not apply to this item):
+
+| field | this modem | BSNL config |
+|---|---|---|
+| SIP port | 5060 | 5060 |
+| registration expiry | 600000 | 600000 |
+| subscribe expiry | 600000 | 600000 |
+| T1 / T2 / T4 | 2000 / 16000 / 17000 | 2000 / 16000 / 17000 |
+| retry base | 30000 | 30000 |
+| **SIP MTU** | **1300** | **1500** |
+
+One mismatch in nine. Setting it to 1500 produced, immediately and for the first
+time in the whole investigation:
+
+```
+qcril_qmi_nas_set_registered_on_ims: registered: 1
+```
+
+and then the first call the modem has ever built on the IMS path:
+
+```
+qcril_qmi_voice_voip_call_info_dump: call state 1, call type 0, call mode 4
+Set audio call_type as IMS
+```
+
+`call mode 4` is IMS and `call state 1` is active. Every previous call was
+`call mode 2` with audio type VOICE.
+
+### It is still not VoLTE
+
+Polling ofono's `NetworkRegistration` once per iteration through a live call
+caught `rat="lte"` followed by `rat="gsm"` with `calls=1`. **The radio was on GSM
+while a call was up.** Three dialled calls all went out over the IMS ext path and
+ended with Q.850 causes 31, 65535 and 16 -- two normal clearings and one
+undefined failure, which is the "problem with network" the handset showed.
+
+So the modem now attempts IMS, sets the call up as IMS, and the call still ends
+up on CS.
+
+### A measurement error worth not repeating
+
+Every "N csfb markers" figure in this document before this section is wrong.
+They counted `qcril_qmi_nas_wave_data_reg_in_case_of_csfb`, which is routine
+housekeeping that fires constantly whether or not a fallback happens. The
+unambiguous marker is `csfb_in_alerting` / `invalidate_data_snapshot_in_case_of_csfb`.
+Polling the RAT directly, as above, is better than either -- it needs no
+interpretation.
+
+Related: `logcat -f` writes the entire ring buffer to its file, so any count over
+an unfiltered capture picks up hours of history from previous rild instances.
+Filter by the running pid and by the minute in question, or the numbers are
+fiction.
+
+### What persists on the handset
+
+After a reboot, verified:
+
+| item | state |
+|---|---|
+| carrier config | patched retarget, version `091b0205`, selected for SUB0 |
+| `sms_domain_pref` | 1 (PS_PREFERRED) |
+| reg-mgr P-CSCF | `61.2.220.137` |
+| client provisioning VoLTE / VT | 1 / 1 |
+| IMS SMSC | `+919442099997` (BSNL's, corrected from Reliance's `10138`) |
+| **SIP MTU** | **1500 -- did not revert** |
+
+The MTU write was expected to revert, on the reasoning that the carrier config
+re-applies its items at boot. It did not, because qcril only re-applies a config
+whose version is newer than the one already active, and the version was
+unchanged. So NV writes survive a reboot unless the config is re-staged with a
+bumped version -- the opposite of what the `sms_domain_pref` experiment
+suggested, and worth knowing before relying on either behaviour.
+
+1500 is the value BSNL's own carrier config specifies, so leaving it is
+defensible; it is noted here because it was not the intended outcome of the
+reboot.
+
+### The open question
+
+Everything from the carrier config down to the call setup now behaves as it
+should, and the call still lands on CS. The next thing to establish is what
+happens between `call mode 4` and the radio being on GSM -- whether the INVITE
+fails and the modem silently redials on CS (`qipcall_domain_selection_enable` is
+1, so it is permitted to), or whether the call is placed on IMS and then handed
+to CS. A capture filtered to the running rild across a single call, with the RAT
+polled alongside, would separate those.
