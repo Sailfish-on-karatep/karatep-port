@@ -2602,3 +2602,57 @@ What is *not* yet established is why `processRequest` fails. It is inside rild,
 past the HIDL boundary, so the next step is that function and whatever state it
 checks -- most likely whether qcril's IMS module has a client registered on its
 event loop at all.
+
+## Down to the allocation, and what that rules out
+
+`ImsRadioImpl::processRequest` is a short pipeline:
+
+```
+utils::imsRadioGetTag(slot, msgId, &tag)
+qcril_qmi_ims_map_request_to_event(msgId)      -> event id
+qcril_qmi_ims_get_msg_size(...)                -> size
+qcril_qmi_ims_convert_ims_token_to_ril_token(...)
+qcril_qmi_ims_flow_control_event_queue(...)    -> ril error
+qcril_qmi_ims_map_ril_error_to_ims_error(...)  -> returned
+```
+
+so the error `setServiceStatus` acts on comes from
+`qcril_qmi_ims_flow_control_event_queue`. That function is 0x2620 bytes with a
+single exit returning a local at `sp+0x13c`, and **only three instructions ever
+write it**: one initialising it to 0 at entry, and two setting it to 2
+(`GENERIC_FAILURE`). Both of those sit immediately after a `qcril_malloc_adv`
+whose result tested NULL — one for the 0x38-byte event header, one for the
+payload buffer sized from `qcril_qmi_ims_get_msg_size`.
+
+**There is no other failure path.** No client check, no registration check, no
+"is the IMS module up" check, no state machine. The function either allocates
+and queues, or fails to allocate. Which retires a family of hypotheses this
+document has been entertaining all day -- that qcril refuses the request because
+IMS is not registered, or because no client is attached, or because the modem is
+in the wrong state. It cannot; it never looks.
+
+Straight memory exhaustion does not explain it either. At the time of a dropped
+call the handset had 1.6 GB free and 2.7 GB available, no swap pressure, no OOM
+kills in dmesg, and rild's RSS was 20 MB. That leaves a bogus *size* -- if
+`qcril_qmi_ims_get_msg_size` returns 0 or something absurd for this message, the
+allocation fails without the system being short of memory. That is the next
+thing to read.
+
+### Both rild processes have live IMS modules
+
+Also worth correcting, since an earlier section leaned on the opposite: slot 1
+(pid 2171) and slot 2 (pid 2054) are *both* running IMS. Within seconds of an
+ofono restart each logs `qcril_qmi_imsa_service_status_ind_hdlr`,
+`qcril_qmi_ims_create_ims_info` and `sendMessage: IMS_UNSOL_SRV_STATUS_UPDATE`
+-- rild pushing unsolicited IMS messages to a client. The IMS side of qcril is
+up on both slots.
+
+### One observation held back deliberately
+
+At 15:37:47 UTC ofono called `setServiceStatus` on `imsradio0` and had a
+response 130 ms later, and slot 1's rild logged **nothing at all** in that
+second. It is tempting to read that as the call never arriving. It is not
+sound: the HIDL server path's logging is gated on the same log-level globals as
+everything else in this library, and `flow_control_event_queue` logs only on
+some paths. Absence of a log line is not absence of a call, and this document
+has already been wrong twice today by treating it as such.
