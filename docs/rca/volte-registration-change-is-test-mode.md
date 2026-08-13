@@ -2879,3 +2879,66 @@ presents as PS_PREFERRED, `supplement_service_domain_pref` is `03`).
 
 `scripts/qmi/efswrite.py` can write it, and the value survives a reboot, so the
 test is one write and one power cycle per candidate.
+
+## The gate opens: SMS domain preference, changed the only way that sticks
+
+Writing `/nv/item_files/modem/mmode/sms_domain_pref` directly does not survive a
+reboot -- it reads back as `01` every time. **The modem re-applies its activated
+carrier config on every boot**, so any NV item the config owns is restored. That
+is a general fact about this port worth remembering: NV items carried by a
+carrier config can only be changed in the config.
+
+`scripts/mcfg/patchitem.py` does that, with the same record framing
+`karatep-modem-config.py` uses and the same version bump and re-hash as
+`retarget.py`. Patching the staged config to `sms_domain_pref = 3` and letting
+qcril re-select it took:
+
+```
+NV sms_domain_pref: 03
+mcfg version:       081b0205
+Selected config for SUB0: mcfg_sw/rjil.mbn
+```
+
+And three things that had been dead all day moved at once:
+
+* `qcril_sms_process_transport_nw_reg_info_ind` **fired** -- the first time in the
+  entire investigation, having been 0 through every previous measurement;
+* `qcril_qmi_nas_set_registered_on_ims` was **called**, which nothing had ever
+  done before;
+* `imsa` began reporting `VOIP: service_status(valid)`, where it had been
+  permanently `not valid`.
+
+This confirms the causal chain end to end and live, rather than by disassembly:
+the SMS domain preference really does gate everything downstream of it.
+
+### But the answer it carries is 0
+
+```
+qcril_qmi_nas_set_registered_on_ims: registered: 0
+```
+
+The indication now arrives and reports the SMS transport as **not** registered
+over IMS, so `nas_cached_info + 0x624` is still written as zero, `ims_rte` stays
+0, and voice still goes CS. Forcing a completely fresh registration -- bearer
+fully down, IMS deregistered, then back up so the REGISTER is issued under the
+new configuration -- produces the same `registered: 0`, with IMS itself
+progressing normally through `state:1 -> 2 -> 0`.
+
+So the modem is now asking, and the network is not granting SMS over IMS.
+
+### Which raises a question about the network, not the device
+
+Everything on the handset that can be checked is now correct and, for the first
+time, demonstrably exercised. What is left is whether BSNL offers SMS over IMS on
+this subscription at all. Plenty of VoLTE deployments carry SMS over CS via SGs
+and never register an IMS SMS transport -- and if BSNL is one of them, then this
+qcril build cannot set `ims_rte` by any route, because
+`qcril_qmi_nas_set_registered_on_ims` has exactly one caller and that caller is
+the SMS transport indication.
+
+That would make the remaining obstacle a mismatch between what this 2016 qcril
+requires to believe IMS voice is available and what the network actually
+provides, rather than a misconfiguration. It is also directly checkable against
+the reference handset that does VoLTE on this SIM: if it registers an IMS SMS
+transport, the network supports it and something here still differs; if it does
+not, this path is a dead end and `ims_rte` has to be reached another way.
