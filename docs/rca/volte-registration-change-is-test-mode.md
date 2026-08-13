@@ -2372,3 +2372,65 @@ and only this last link is unreliable.
 Current state, with the bearer held up by the keeper: IMS reaches
 `QtiRadioRegInfo state:0`, both services are requested, `ims_rte` is still 0,
 and calls still go CS.
+
+## rild cannot be restarted: its IMS module does not come back
+
+Why `setServiceStatus` is processed sometimes and swallowed other times has a
+blunt answer. Counting log lines per rild instance:
+
+| rild pid | total lines | lines containing "ims" |
+|---|---|---|
+| 17126 (earlier instance) | 429 | 234 |
+| 26419 (after `ctl.restart ril-daemon`) | 1400 | **0** |
+
+The restarted rild has logged fourteen hundred lines and **not one of them
+mentions IMS**. Its IMS subsystem is completely inert: it still serves the
+`IImsRadio` binder interface -- ofono's calls get answered, transaction 9 in,
+response 6 out -- but nothing is ever turned into a
+`QCRIL_EVT_IMS_SOCKET_REQ_*`, so qcril never sees it and the modem is never
+told. The newest IMS socket event of any kind in the buffer stays frozen at the
+last timestamp of the *previous* rild.
+
+The ims daemons explain it. After `ctl.restart ril-daemon`:
+
+```
+vendor.imsqmidaemon    pid 2102     <- not restarted, from boot
+vendor.imsdatadaemon   pid 58418    <- not restarted
+vendor.imsrcsservice   pid 26543    <- restarted with rild
+vendor.ims_rtp_daemon  pid 26545    <- restarted with rild
+ril-daemon             pid 26419
+```
+
+Half the set restarts with rild and half does not, and the sockets rild's IMS
+module needs (`/dev/socket/ims_qmid`, `/dev/socket/ims_datad`) belong to the
+half that did not. The new rild never gets its IMS side up.
+
+### What this invalidates
+
+Every measurement taken after a rild restart was made against a rild whose IMS
+module was dead, and that includes a lot of today. It also means the one window
+where `setServiceStatus` visibly reached qcril was the coherent instance, and the
+"accepted and dropped" behaviour recorded much earlier in this document was
+probably this same effect all along rather than a HAL that ignores the call.
+
+### The catch-22 it creates
+
+Carrier-config staging as done here ends in `setprop ctl.restart ril-daemon`,
+because that is what makes qcril re-select the config. So:
+
+* stage the config and restart rild -> the retargeted config is selected, and
+  rild's IMS module is dead;
+* reboot instead -> IMS is alive, but boot rebuilds the `qcril_sw_mbn_*` tables
+  from the pristine vendor images, so 404/80 no longer matches the retargeted
+  config and it is not selected.
+
+Neither order gives a working combination, which is why every call test today
+ran with one half of the stack or the other missing.
+
+The way out is the one the port already has a design for and has never used
+here: stage the MBN files **at boot, before rild starts**, so a single boot
+produces both a selected config and a live IMS module.
+`karatep-modem-config.py` exists in droid-config for exactly this and has never
+been installed on this handset -- all staging so far has been by hand. That is
+the next step, and it has to come before any further call testing, because until
+it lands no test is measuring the whole stack at once.
