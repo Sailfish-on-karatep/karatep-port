@@ -2656,3 +2656,56 @@ sound: the HIDL server path's logging is gated on the same log-level globals as
 everything else in this library, and `flow_control_event_queue` logs only on
 some paths. Absence of a log line is not absence of a call, and this document
 has already been wrong twice today by treating it as such.
+
+## The message-size table is fine, so that hypothesis is dead
+
+The previous section proposed that `qcril_qmi_ims_get_msg_size` returns 0 for
+SET_SERVICE_STATUS, making the payload `qcril_malloc_adv(0)` return NULL and the
+request get dropped. It does not.
+
+The table can only be read from a live process: the pointer lives in a GOT slot
+at `+0xfe98d0`, the library uses Android's packed relocations, so on disk that
+slot is zero and `readelf -r` shows no relocation for it at all.
+`scripts/qmi/readmsgtable.py` reads it out of the running rild. One trap worth
+recording -- the first `PT_LOAD` of this library has `p_vaddr 0xb9000`, not 0, so
+the load bias is the mapping start *minus* that; adding a vaddr to the mapping
+start directly lands 0xb9000 high and reads string data ("obuf26ST" instead of a
+pointer).
+
+The table is 133 rows of `{msg_id, msg_type, ..., size}`, ids paired as
+(id, type=1) and (id, type=2). For ours:
+
+```
+   56: id=30   type=1   size=72
+   57: id=30   type=2   size=0
+```
+
+`get_msg_size(30, REQUEST)` returns **72**, not 0. The allocation it feeds is a
+72-byte one on a handset with 2.7 GB available. It is not failing.
+
+### Which leaves the whole "processRequest fails" story unsupported
+
+Worth being explicit, because three sections of this document have been built on
+it: **the failure was never observed.** It was inferred from qcril logging
+nothing when ofono calls `setServiceStatus`, and the reasoning went
+"`setServiceStatus` only drops the request when `processRequest` errors, so
+`processRequest` must be erroring". Both of the ways that can happen have now
+been checked and neither holds -- memory is not short, and the size lookup
+returns a sane value.
+
+So the premise is the thing to doubt. The remaining possibilities, none yet
+distinguished:
+
+* the call succeeds and is queued, and qcril simply does not log it at the level
+  being captured -- the logging throughout this library is gated on a runtime
+  level, and `logcat -b radio` is not the same as having that level on;
+* the call is answered by something other than the rild instance whose log is
+  being read;
+* it does fail, but somewhere in `flow_control_event_queue` that has not been
+  read yet -- the function is 0x2620 bytes and only its return-value writes have
+  been examined.
+
+The productive next step is not more static reading. It is to make rild say what
+it is doing: raise its log level (`persist.vendor.radio.ril_extra_debug` is
+already set, so the relevant control is elsewhere) or attach to the process, so
+that a call in and a queue out can be observed rather than deduced.
