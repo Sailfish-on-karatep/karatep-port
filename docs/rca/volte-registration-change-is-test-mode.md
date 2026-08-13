@@ -3332,3 +3332,68 @@ This is the same shape as the `setServiceStatus` behaviour recorded earlier -- a
 request accepted by the IMS HAL whose response never comes back -- and it is now
 the best-localised bug in this whole investigation: a working data path with a
 missing completion.
+
+## Root cause of the SMS hang: sendImsSms does not exist on this HAL
+
+With ofono's debug written straight to a file -- journald on this handset has
+stopped recording entirely, zero lines across all units with 17 GB free, through
+a vacuum and a restart -- the transaction is visible in full:
+
+```
+ims:Connected to vendor.qti.hardware.radio.ims@1.0::IImsRadio/imsradio1
+...
+imsradio0< [0000000f] 43 sendImsSms
+  0020: 32 3a 3a 49 49 6d 73 52 61 64 69 6f    "2::IImsRadio"
+```
+
+The plugin connects to **@1.0** and sends `sendImsSms` carrying the **@1.2**
+interface descriptor. gbinder selects the descriptor from the transaction code:
+
+```c
+static const GBinderClientIfaceInfo radio_iface_info[] = {
+    {QTI_RADIO_1_2, QTI_RADIO_REQ_LAST_1_2 },   /* 47: codes 42-47 */
+    {QTI_RADIO_1_1, QTI_RADIO_REQ_LAST_1_1 },   /* 41 */
+    {QTI_RADIO_1_0, QTI_RADIO_REQ_LAST_1_0 }    /* 40: codes <= 40 */
+};
+```
+
+and `c(43, 37, sendImsSms, SEND_IMS_SMS)` is code 43, above the 1.0 boundary.
+Every call that works on this device is at or below 40 -- `getImsRegistrationState`
+(4), `requestRegistrationChange` (7), `setServiceStatus` (9), `setConfig` (12) --
+and each gets its response. The single call above the boundary gets none.
+
+`sendImsSms` is a method that only exists in `IImsRadio@1.2`. **This device
+implements @1.0 only**, so the method is not there to call; the transaction is
+discarded for an unknown descriptor and no response is ever sent. ofono's send
+callback is only ever invoked from the response handler, so the UI sits at
+"Sending..." forever and the submit queue behind it stalls.
+
+### Correcting the previous section
+
+The section above concludes "SMS over IMS works, only the acknowledgement is
+missing", from three delivered messages whose PDU lengths matched three
+`ims:Sending SMS` dispatches. The arithmetic identified the right three messages
+but attributed them to the wrong path. Immediately before each IMS attempt the
+log also shows
+
+```
+src/binder_sms.c:binder_sms_send() pdu_len: 20, tpdu_len: 19
+```
+
+-- ofono's ordinary RIL SMS path running as well. Those messages went out over
+RIL, not IMS. **SMS over IMS has never worked on this device and cannot**, until
+either the vendor ships a newer IImsRadio or the send is routed elsewhere.
+
+### The fix
+
+`qti_ims_sms` advertises `BINDER_EXT_SMS_INTERFACE_FLAG_IMS_SUPPORT`
+unconditionally, so ofono routes SMS to a transport that cannot carry it. It
+should advertise IMS SMS support only when the negotiated interface is at least
+1.2, and let ofono use its normal path otherwise. The plugin already knows which
+version it connected to -- it probes 1.2, then 1.1, then 1.0 and logs the result
+-- so the information needed is in hand.
+
+The same boundary is worth auditing across the whole opcode table: any entry
+above 40 is unreachable on this handset, and `setServiceStatus` and the config
+calls being below it is the only reason the rest of this investigation had
+anything to work with.
