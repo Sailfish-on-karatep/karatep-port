@@ -4161,3 +4161,66 @@ problem.
 
 The `#sailfishos-porters` archive returns **zero hits** for `SDP parse failed`
 and zero for `LucentPCSF`. There is no prior art to follow.
+
+### The modem keeps no record of the decision
+
+If the abort is a local decision taken inside 48 ms, it might leave a trace in a
+log packet even though this firmware has no F3 messaging. `scripts/qmi/sdpwatch.py`
+captures *every* frame under equipment id 1 — code, length, timestamp, and any
+run of printable text — rather than the two codes the SIP dump filters to.
+
+**72,323 frames over one window, 86 distinct log codes, and not one of them is
+specific to the failure.** Every code that appears between the 183 and the CANCEL
+also appears elsewhere in the capture, in all three attempts:
+
+```
+0x11eb 0x12c1 0x1356 0x135a 0x135b 0x1375 0x14d0 0x14d2 0x14f2 0x152e 0x152f
+0x1530 0x1531 0x1544 0x156e 0x1586 0x158c 0x17f7 0x1830 0x18a7 0x18e1
+```
+
+Most of that is PHY and RLC/MAC flooding — `0x152e`–`0x1531`, `0x14d0`, `0x14d2`
+and `0x1586` alone are 50,680 of the 72,323 frames. The IMS-side codes that do
+fire at the decision point (`0x1544` at 831 bytes, `0x18e1` at 1280, `0x1375` at
+1452) carry no printable run of even twelve characters, so they are packed
+structures with no message database to decode them against.
+
+The shape of the window is worth recording anyway:
+
+```
+91.818  0x156e  183 Session Progress
+91.821  0x156e  PRACK
+91.840  0x11eb  the PRACK going out on the wire
+91.841 – 91.868 nothing but PHY logging
+91.869  0x156e  CANCEL
+```
+
+So the modem does not decide and abort in one motion. It PRACKs, transmits, and
+then sits for 28 ms doing nothing it considers worth logging before cancelling.
+
+### mode-set: a dismissal that was argued from the wrong thing
+
+One item was ruled out earlier on bad grounds, and the SDP capture brings it
+back. `qipcall_codec_mode_set` is `00000000` here, and that was dismissed because
+four of the six configs in this modem image also ship zeros — an argument from
+prevalence rather than from behaviour. Those four are for networks whose media
+gateways may simply never put `mode-set` in an answer.
+
+BSNL's does, and it is the one parameter in the answer that is genuinely *new*
+rather than differently spelled:
+
+```
+ours    a=fmtp:97 mode-change-capability=2;max-red=0
+theirs  a=fmtp:97 mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1
+```
+
+If the modem intersects the network's mode set with an empty local one, the
+result is empty and the call dies on an answer that parses perfectly well — which
+is the symptom, media-class end cause 373 rather than a SIP 488.
+
+0, 2, 4 and 7 are AMR-NB 4.75, 5.90, 7.40 and 12.20 kbit/s, so bits 0, 2, 4, 7,
+`0x95`, written little-endian over the existing four bytes.
+
+This is a better-formed experiment than the fourteen alignments that preceded it,
+because it reads out either way: the capture shows whether our offer now carries
+`mode-set` at all, and whether BSNL's answer changes in response. Neither
+question can be answered by reading NV items.
