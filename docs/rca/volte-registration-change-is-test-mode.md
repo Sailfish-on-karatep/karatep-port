@@ -3684,3 +3684,67 @@ next thing to chase, and it should be treated as a hypothesis, not a finding.
 entirely. It is a debugging setting, not a shipping one, and has been put back
 to 1. Any future work here has to hold both facts at once: `irte` wants PS_ONLY,
 messaging wants PS_PREFERRED.
+
+## The dial request: right diagnosis, and a change that broke calling
+
+Searching the published material narrowed the problem usefully. CSFB while IMS
+is registered has three documented causes: the UE failed to register with the
+CSCF, the network signalled "VoLTE not supported" in NAS, or the SIP INVITE
+failed. The first two are ruled out here — `imsa` reports `Status 2` registered
+over LTE, and the network advertises IMS voice over PS in 32 of 36 samples — so
+the dial itself was the place to look.
+
+libqmi's published `qmi-enums-voice.h` then made the log line unambiguous:
+
+```
+QMI_VOICE_CALL_TYPE_VOICE    = 0x00
+QMI_VOICE_CALL_TYPE_VOICE_IP = 0x02
+```
+
+`qcril_qmi_voice_request_dial: .. call type set 0` is therefore qcril asking the
+modem for a **CS voice call**. The modem was never overriding `ims_rte`; it was
+doing as it was told. That retires the "the modem refuses the call" hypothesis
+recorded above.
+
+And the reason is in our own plugin, `qti_radio_ext_dial_args()`:
+
+```c
+dial_request_writer->call_details.call_type   = QTI_RADIO_CALL_TYPE_VOICE;
+dial_request_writer->call_details.call_domain = QTI_RADIO_CALL_DOMAIN_UNKNOWN;
+...
+dial_request_writer->has_call_details = FALSE;
+```
+
+`has_call_details` is the presence flag for the whole `call_details` struct, so
+every field above it was populated and then disclaimed. The dial goes out with
+no domain information at all.
+
+### What happened when that was "fixed"
+
+Setting `has_call_details = TRUE` with `call_domain = AUTOMATIC` **broke calling
+entirely**: no outgoing calls, and callers heard "switched off". Reverted
+immediately (`2185e45`), rebuilt and reinstalled, and the handset was verified
+back to `registered` / `lte` on BSNL with `VoiceCallManager` present.
+
+So the diagnosis is probably right and the remedy is definitely wrong. Useful
+things follow from the failure:
+
+- The vendor HAL does read `has_call_details`. A dial that sets it is handled on
+  a materially different path — one that does not merely change the domain but
+  stops the call being placed at all. If the flag were ignored, nothing would
+  have changed.
+- `AUTOMATIC` (3) is probably not a value this @1.0 `IImsRadio` accepts. The
+  remaining candidates are `PS` (2), and populating the fields this path
+  evidently also requires. `call_type` may need to be something other than
+  `VOICE`, and the three ability vectors and `sip_alternate_uri` are currently
+  empty.
+- "Switched off" to the caller means the network had no reachable CS or IMS
+  termination for the subscriber, which is a stronger failure than a rejected
+  dial and suggests the request left the modem in a state where it deregistered
+  rather than simply refusing.
+
+The next attempt at this must be made with a way to see the HAL's own response
+to the dial — the ofono debug log with the qti binder trace, so the reply and
+its error code are visible — rather than inferred from whether a call connects.
+Changing a dial-path field blind costs the user their phone service, and this
+one did.
