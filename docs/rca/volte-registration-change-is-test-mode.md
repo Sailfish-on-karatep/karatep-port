@@ -4224,3 +4224,74 @@ This is a better-formed experiment than the fourteen alignments that preceded it
 because it reads out either way: the capture shows whether our offer now carries
 `mode-set` at all, and whether BSNL's answer changes in response. Neither
 question can be answered by reading NV items.
+
+### mode-set is eliminated, this time by behaviour
+
+`qipcall_codec_mode_set = 0x95` reached the wire exactly as intended:
+
+```
+ours    a=fmtp:97 mode-set=0,2,4,7;mode-change-capability=2;max-red=0
+theirs  a=fmtp:97 mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1
+```
+
+Our offer now declares precisely the mode set BSNL answers with, AMR negotiates
+identically in both directions, and the call still ends `SDP parse failed`, end
+cause 373. BSNL's answer did not change in response. The item is restored to
+`00000000`.
+
+That is what a proper elimination looks like, and it is worth contrasting with
+how this item was dropped the first time — on the grounds that four of six
+configs also ship zeros. The readout, not the prevalence, is what settled it.
+
+One asymmetry between offer and answer now survives:
+
+```
+ours    a=rtpmap:96 telephone-event/8000
+theirs  a=rtpmap:96 telephone-event/8000/1
+```
+
+### The reference handset is not evidence about this modem
+
+Worth stating plainly, because it has been leaned on. "The same SIM does VoLTE
+instantly in another handset" is true and establishes that BSNL's network and
+this SIM's provisioning are fine. It establishes nothing about whether an
+LA.2.0-era MSM8937 can talk to BSNL's core, because the reference handset is a
+**Xiaomi Mi 11X** — Snapdragon 870, four modem generations newer, and its log
+mentions EVS. Our baseband is `MSM8937.LA.2.0-00440-STD.PROD-1`, built
+November 2017.
+
+Its captured radio log is an Android framework log (`ImsPhone`, `XIAOMI_QCRIL`)
+from an unrooted handset, so it carries no SIP and cannot be compared against
+ours message for message.
+
+This also closes the firmware-upgrade idea before it costs anything. A newer
+MSM8937 modem image from another vendor's device will not load: modem images are
+authenticated by TZ against the OEM fuses, so a Xiaomi- or Motorola-signed image
+on a Lenovo device fails to start rather than misbehaving. And Lenovo never
+shipped this device anything past the Android 7 baseband we already run.
+
+### The one knob that changes BSNL's answer
+
+Everything tried so far changes our offer. Only one setting changes what BSNL
+sends *back*: whether we advertise preconditions. With
+`qipcall_precondition_enable = 0` the INVITE carries no `a=curr`/`a=des`/
+`a=conf:qos` and does not list `precondition` in `Supported`, so the answer
+returns without its five precondition attributes and without asking us to
+confirm a reservation — materially less for the modem to parse, and the only one
+of the four remaining oddities we can influence at all.
+
+Two other things point the same way.
+
+The five media booleans were changed from Jio's values to the consensus of the
+other five configs, on a five-to-one majority. But the configuration under which
+this modem is known to have actually placed VoLTE calls is the one with all five
+at **0** — the user's own history on Jio. A majority across other operators'
+configs is weaker evidence than this handset having worked.
+
+And it has never been tested cleanly. The first `SDP parse failed` was seen with
+these at 0, but on a run that had no IMS bearer at all; every run since has had
+them at 1. Zero, with a working bearer and the dial fix in place, is untested.
+
+The 28 ms of silence between the PRACK leaving and the CANCEL fits: with
+preconditions in play the modem's next move is to reserve resources and send an
+UPDATE, and that is exactly the step it never takes.
