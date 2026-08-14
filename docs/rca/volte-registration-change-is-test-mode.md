@@ -4005,3 +4005,159 @@ be read from the AP, and the modem emits no F3 debug messaging. If the next test
 fails too, that is the honest end of what this approach can establish, and the
 finding should be written up as "VoLTE reaches media negotiation and stops
 there" rather than pursued further by guessing at NV items.
+
+## The SDP is readable after all, and the call flow is now fully visible
+
+Two things above are wrong and are corrected here.
+
+**"The SDP cannot be read from the AP."** It can. The modem logs whole SIP
+messages, in plain text, under DIAG **log code `0x156e`** — equipment id 1.
+
+**"The modem emits no SIP at all."** That was recorded from a scan that found
+nothing, and it was true of the modem *at that moment* and of nothing else: it
+was captured when IMS never registered, so the modem was not sending any SIP for
+it to log. It says nothing about a modem that registers. Re-running the same
+scan now returns SIP immediately. A negative from an instrument pointed at a
+system in a different state is not a property of the instrument, and it was
+filed here as though it were.
+
+`scripts/qmi/sdpdump.py` does the capture. Two mechanical points matter:
+
+- **Only equipment id 1.** `0x156e` (whole message), `0x11eb` (the same bytes as
+  280-byte IP fragments, useless for reading) and `0x1544` all live there.
+  Raising all sixteen masks works but costs a sustained load average above 4,
+  which starves the shell driving the test.
+- **`read()` on `/dev/diag` must have a deadline.** `diagchar_read()` waits in
+  `wait_event_interruptible()` and ignores `O_NONBLOCK`, and `diagchar_poll()`
+  reports the device readable whenever the driver has been woken rather than
+  when a batch is queued — so `select()` promises data that `read()` then sleeps
+  on forever. The first version of this script wedged exactly there and had to
+  be killed. A one-shot `SIGALRM` armed around the read alone is the fix; arming
+  it around the whole loop instead risks a signal landing mid-write.
+
+This also explains why every packet capture was a dead end. The registration
+negotiates IPsec — `Security-Client` / `Security-Verify`, `ealg=null`, ports
+8973 and 8108 — so nothing useful was ever going to appear on port 5060. DIAG
+logs the message before encryption.
+
+Identifiers below are redacted: `4048001XXXXXXXX` is the private user identity,
+`+9194873XXXXX` the MSISDN, `+9194873YYYYY` the called party.
+
+### Registration is genuinely healthy
+
+Not "the transport came up for 4.7 seconds" — a real registration, answered by
+BSNL's own S-CSCF:
+
+```
+REGISTER sip:ims.mnc080.mcc404.3gppnetwork.org SIP/2.0
+Authorization: Digest username="4048001XXXXXXXX@ims.mnc080.mcc404.3gppnetwork.org",
+  realm="ims.mnc080.mcc404.3gppnetwork.org", qop=auth, algorithm=AKAv1-MD5, response=...
+m: <sip:4048001XXXXXXXX@10.128.124.137:8973>;+g.3gpp.icsi-ref="...icsi.mmtel";
+   +g.3gpp.smsip;video;+sip.instance="<urn:gsma:imei:...>"
+```
+
+and a reg-event `SUBSCRIBE` answered `200 OK` with `Expires: 86400`, routed
+`<sip:originating@tn1scfx010.ims.mnc080.mcc404.3gppnetwork.org:5090;...>`.
+AKA authentication succeeds, so the ISIM/USIM path, the P-CSCF discovery and the
+IPsec SA all work.
+
+### The call dies 40 ms after the PRACK
+
+Four attempts in one window, identical each time:
+
+```
+t=122.7  INVITE tel:+9194873YYYYY            CSeq 810340588 INVITE
+t=123.0  SIP/2.0 100 Trying
+t=123.6  SIP/2.0 183 Session Progress        RSeq: 1     <- carries the SDP answer
+t=123.7  PRACK sip:pcgw-tcsp...              RAck: 1 810340588 INVITE, Content-Length 0
+t=123.7  CANCEL tel:+9194873YYYYY            <- ours, 40 ms after the PRACK
+t=123.8  SIP/2.0 200 OK                      CSeq ... CANCEL
+t=123.9  SIP/2.0 487 Request Terminated
+```
+
+The fifth call in the window went to 1503 and came back `380 Alternative
+Service` — the network itself directing us to CS. That is why that call, and
+only that call, went through, and why the handset then sat on 3.5G.
+
+Three things follow immediately:
+
+- **We cancel.** The network is not refusing anything: it offers a session and
+  the modem walks away from it.
+- **40 ms is not a timeout.** It is not a failed resource reservation either,
+  which would take seconds. It is a local decision taken on the spot.
+- **The PRACK carries no body** (`l: 0`), so the modem accepted the 183 as a
+  valid reliable provisional response before rejecting its contents.
+
+qcril reports QMI **call end cause 373**, which it cannot name
+(`map qmi reason: 373 to ril reason: 65535`, "Error unspecified"), alongside
+`end_reason_text (UTF-8): SDP parse failed`. 373 sits in the modem's media-class
+range, consistent with the text.
+
+### What BSNL actually answers with
+
+Our offer, from the modem:
+
+```
+o=- 2180 1000 IN IP4 10.206.3.6
+s=QC VOIP
+c=IN IP4 10.206.3.6
+b=AS:41 / b=RS:600 / b=RR:2000
+m=audio 50010 RTP/AVP 99 97 105 96
+a=rtpmap:99 AMR-WB/16000/1        a=fmtp:99 mode-change-capability=2;max-red=0
+a=rtpmap:97 AMR/8000/1            a=fmtp:97 mode-change-capability=2;max-red=0
+a=rtpmap:105 telephone-event/16000
+a=rtpmap:96 telephone-event/8000
+a=curr:qos local none / remote none
+a=des:qos mandatory local sendrecv / a=des:qos optional remote sendrecv
+```
+
+BSNL's answer, from a Lucent PCSF:
+
+```
+o=LucentPCSF 688276523 688276523 IN IP4 imsgroup-321-0000001.tns02.ims.mnc080.mcc404.3gppnetwork.org
+s=-
+c=IN IP4 61.2.220.150
+m=audio 21288 RTP/AVP 97 96
+c=IN IP4 61.2.220.150
+a=rtpmap:97 AMR/8000/1
+a=fmtp:97 mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1
+a=rtpmap:96 telephone-event/8000/1
+a=fmtp:96 0-15
+a=curr:qos local none / remote none
+a=des:qos optional local sendrecv / a=des:qos mandatory remote sendrecv
+a=conf:qos remote sendrecv
+a=sendrecv
+```
+
+The negotiation itself is correct. It picks payload types we offered (97 AMR-NB,
+96 telephone-event/8000), it agrees on bandwidth-efficient AMR (neither side
+sends `octet-align=1`), and the precondition attributes mirror ours properly:
+their `local` is our `remote`, so `des:qos optional local` / `des:qos mandatory
+remote` answers our `des:qos mandatory local` / `des:qos optional remote`, and
+`conf:qos remote sendrecv` asks us to confirm when our side has reserved. There
+is nothing here to *negotiate* our way out of — which fits the wording, a parse
+failure rather than a 488.
+
+Four things in that answer are candidates, and **we control none of them**:
+
+1. **`o=` declares `IN IP4` and then supplies a 58-character FQDN** instead of a
+   dotted quad. RFC 4566 permits an FQDN; embedded parsers that hand the field
+   straight to an address conversion routine do not.
+2. **`a=fmtp:97` has spaces after its semicolons.** Legal, and a hazard for
+   naive `strtok`-style parameter splitting.
+3. **`a=rtpmap:96 telephone-event/8000/1`** carries a channel count we did not
+   offer (`telephone-event/8000`).
+4. **`c=` appears at both session and media level.** Legal, and duplicated.
+
+### Why the parser cannot simply be read
+
+The modem image is packed. Not only is `SDP parse failed` absent from
+`strings` over every `modem.b*` segment — so is `QC VOIP`, which the modem
+demonstrably generates itself, and so are `telephone-event`, `a=curr:qos` and
+`mode-change-capability`. Nothing that the IMS stack emits is visible as a
+literal, so there is no string to anchor a disassembly on, and this is the same
+opacity that produced the "no F3 messaging" finding rather than a separate
+problem.
+
+The `#sailfishos-porters` archive returns **zero hits** for `SDP parse failed`
+and zero for `LucentPCSF`. There is no prior art to follow.
