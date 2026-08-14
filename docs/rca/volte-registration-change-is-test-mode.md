@@ -3733,11 +3733,9 @@ things follow from the failure:
   a materially different path — one that does not merely change the domain but
   stops the call being placed at all. If the flag were ignored, nothing would
   have changed.
-- `AUTOMATIC` (3) is probably not a value this @1.0 `IImsRadio` accepts. The
-  remaining candidates are `PS` (2), and populating the fields this path
-  evidently also requires. `call_type` may need to be something other than
-  `VOICE`, and the three ability vectors and `sip_alternate_uri` are currently
-  empty.
+- ~~`AUTOMATIC` (3) is probably not a value this @1.0 `IImsRadio` accepts.~~
+  **Wrong, and disproved below.** `convertHidlToProtoCallDetails` rejects only
+  `callType == 12` and `callDomain == 5`; `0` and `3` are both accepted.
 - "Switched off" to the caller means the network had no reachable CS or IMS
   termination for the subscriber, which is a stronger failure than a rejected
   dial and suggests the request left the modem in a state where it deregistered
@@ -3748,3 +3746,66 @@ to the dial — the ofono debug log with the qti binder trace, so the reply and
 its error code are visible — rather than inferred from whether a call connects.
 Changing a dial-path field blind costs the user their phone service, and this
 one did.
+
+## The call does go over IMS — and dies with "SDP parse failed"
+
+The dial-path change is correct, and the modem confirmed it. With
+`has_call_details = TRUE` and `call_domain = AUTOMATIC`, a real call produced:
+
+```
+qcril_qmi_voice_get_atel_call_type_info:
+  QMI call_type: 2, ... elaboration 4000, 40110 hex
+  ril call type = 0, ril call domain = 3, call sub state = 0
+qcril_qmi_voice_gather_current_call_information:
+  end_reason_text_len: 16, end_reason_text (UTF-8): SDP parse failed
+```
+
+`QMI call_type: 2` is `QMI_VOICE_CALL_TYPE_VOICE_IP`. **For the first time in
+this investigation the call left as VoLTE rather than CS.** Every previous dial
+went out as `call type set 0`.
+
+So the chain from ofono down to the modem is now complete, and the failure has
+moved to where it should be — media negotiation. The call ends with **`SDP parse
+failed`**.
+
+### Why the earlier "it broke calling" reading was the same event
+
+The first time this change was installed, calls stopped working and callers
+heard "switched off". That was recorded above as the change being wrong. It is
+better read as the change working: the call is routed to IMS, IMS fails in SDP,
+and once the UE presents as VoLTE-capable the network stops offering CSFB for
+terminating calls, so an incoming call has nowhere to land. Same defect, seen
+from the caller's side.
+
+### Where the SDP failure probably comes from
+
+Not established, two candidates, in order:
+
+1. **No media address.** The run that produced the message had no IMS bearer:
+   `rmnet_data1` carried only an IPv6 link-local, so the modem had no local IPv4
+   address to place in the SDP offer. A retry with the bearer held up did not
+   complete — see below.
+2. **Jio's media configuration on a BSNL network.** The staged config is still
+   Reliance's, retargeted. `qipcall_audio_codec_list` is
+   `AMR_WB_OA;AMR_WB_BE;AMR_OA;AMR_BE` and `qp_ims_media_config` is Jio's
+   throughout. This is the same class of problem as the SMSC, where Jio's value
+   worked and BSNL's own did not — so it cannot be assumed either way without an
+   A/B.
+
+### Cost of this experiment, and how it must be run next time
+
+The retry with the IMS bearer held up ended with the handset showing no signal
+and "no active SIM". It was not an actual SIM fault — `SimManager` reported
+`Present: true` with the correct ICCID and no PIN required — but the modem was
+left searching, and the user lost service until the known-good plugin was put
+back by hand.
+
+The automatic revert did fire and did restore the plugin. What it did not do is
+stop the context3 watchdog it had spawned, which kept re-activating the IMS PDN
+after the revert. Any future version of this test must kill its own background
+jobs in the trap before restoring, and should deactivate context3 explicitly.
+
+The repository is deliberately left with the dial change **reverted**
+(`4cd3031`), so a rebuild produces the safe plugin. The change is right and
+should be reapplied, but only alongside a fix for the SDP failure — on its own
+it converts working CS calls into failing IMS ones.
