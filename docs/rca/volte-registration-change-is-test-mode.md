@@ -3955,3 +3955,53 @@ header instead of reading the data offset from byte 12. That bug would have
 hidden real SIP had there been any. The reported absence only became evidence
 after the decoder was fixed and the counts still showed nothing but control
 packets.
+
+## Aligning Jio's config to the consensus does not fix the SDP failure
+
+Fourteen items have now been brought to the value the other operator configs
+agree on, across four call windows:
+
+| batch | items |
+|---|---|
+| media booleans | `qipcall_precondition_enable`, `qipcall_qos_enabled`, `qipcall_session_level_media_bw_enabled`, `ims_scr_amr_nb_enabled`, `ims_scr_amr_wb_enabled` |
+| video | `qp_ims_vt_4G_media_capability` (Jio the only config enabling it) |
+| structural | `qp_ims_config`, `qp_ims_sip_extended_0_config`, `qp_ims_reg_config`, `qp_ims_reg_extended_0_config`, `qp_ims_dpl_config`, `qp_ims_voip_config` |
+| last media | `qipcall_audio_codec_list` blanked, `qp_ims_media_config` aligned |
+
+The call still ends the same way. On the most recent run, with twelve of those
+already applied and no redundant `context3` bearer:
+
+```
+QMI call_type: 2   (five times -- still a real VoLTE call)
+end_reason_text (UTF-8): SDP parse failed   (twice)
+```
+
+which matched the handset exactly: the first two calls failed, the next two
+completed over CS. The IMS attempt fails, the modem gives up, and subsequent
+calls take the CS path — the fallback happens between calls, not within one.
+
+`qipcall_config_items` is deliberately still Jio's. It was bisected earlier as
+the single item that makes this modem accept IMS at all, and changing it risks
+losing registration and returning the port to the start.
+
+### What that leaves
+
+Config alignment has been pursued about as far as it can be. The remaining
+possibilities are:
+
+1. The two items just changed (blanked codec list, aligned media config) fix it.
+   Untested at the time of writing.
+2. `qipcall_config_items` is implicated, which cannot be tested without risking
+   the registration that everything else depends on.
+3. **This modem's IMS stack cannot parse what BSNL's core sends.** The firmware
+   is LA.2.0-era; the reference handset that does VoLTE on this SIM is a
+   generation newer and uses the `_v02` QMI path. If BSNL's SDP answer carries
+   something this stack predates, no amount of NV alignment will help, and the
+   symptom -- a *parse* failure rather than a negotiation failure, which would
+   have come back as SIP 488 -- is consistent with that.
+
+Nothing observable on this platform distinguishes (2) from (3): the SDP cannot
+be read from the AP, and the modem emits no F3 debug messaging. If the next test
+fails too, that is the honest end of what this approach can establish, and the
+finding should be written up as "VoLTE reaches media negotiation and stops
+there" rather than pursued further by guessing at NV items.
