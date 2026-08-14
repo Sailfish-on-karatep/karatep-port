@@ -3910,3 +3910,48 @@ retargeted Jio config with a minimal BSNL-correct one": build from
 none of Jio's IMS quirks, and add only what BSNL demonstrably needs. That is a
 larger change than another single NV write, but it stops the sequence of
 one-item-at-a-time corrections against a baseline that is wrong by construction.
+
+## The IMS PDN is the modem's own, and its SIP cannot be read from the AP
+
+Two things came out of trying to capture the signalling, one useful and one a
+dead end.
+
+**`rmnet_data2` is the modem's IMS PDN, and ofono's `context3` is redundant.**
+
+```
+rmnet_data0   UNKNOWN   100.82.6.199/28     internet, ofono context1
+rmnet_data1   UNKNOWN   fe80::.../64        ofono context3, INACTIVE
+rmnet_data2   UNKNOWN   10.138.118.47/27    mtu 1300  <- IMS, modem-owned
+```
+
+`rmnet_data2` is up with a /27 and MTU 1300 — the classic IMS bearer — while
+ofono's `context3` is inactive. The modem brings its IMS PDN up itself, and it
+survives `context3` being deactivated. Every recent test that "brought the IMS
+PDN up" was therefore creating a **second, redundant** PDN to the same APN on
+`rmnet_data1`, alongside the one the modem was already using.
+
+That retires the standing task "make ofono activate the IMS context
+automatically" as wrong-headed. ofono should not manage this context at all;
+doing so duplicates a bearer the modem owns. The earlier note that context3 "is
+the IMS PDN, inactive, and activating it gives a real bearer" was right that it
+produces a bearer and wrong that it is *the* one.
+
+**The SIP payload is not observable from the application processor.** There is
+no IPsec — zero ESP packets in any capture — and traffic does appear on port
+5060 on `rmnet_data2`. But across three captures, including one that forced a
+genuine re-registration by taking the modem offline and back, every packet on
+5060 carried four bytes of payload or fewer: TCP control only, no REGISTER, no
+INVITE. The endpoint lives inside the modem, has no AP socket, and the payload
+evidently does not cross the netdev — consistent with rmnet/QMAP aggregation.
+
+So the SDP that fails to parse cannot be read from this side. Combined with the
+earlier finding that this modem emits no F3 debug messaging at all, there is no
+route to the actual SIP content on this handset. "SDP parse failed" is the most
+detail the platform will give.
+
+One methodology note: the first capture reported "no plaintext SIP" while
+counting packets on 5060, because the sniffer assumed a fixed 20-byte TCP
+header instead of reading the data offset from byte 12. That bug would have
+hidden real SIP had there been any. The reported absence only became evidence
+after the decoder was fixed and the counts still showed nothing but control
+packets.
