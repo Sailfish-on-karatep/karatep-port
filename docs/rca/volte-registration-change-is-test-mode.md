@@ -526,7 +526,7 @@ no matching item entry is silently ignored. The entry is small:
 
 ```json
 {"type": 2, "attributes": 25, "reserved": 0,
- "filename": {"hex": "...", "ascii": "/Data_Profiles/Profile2 ", "__type__": "bytes"},
+ "filename": {"hex": "...", "ascii": "/Data_Profiles/Profile2\0", "__type__": "bytes"},
  "data_magic": 7, "__type__": "MCFG_Item"}
 ```
 
@@ -3422,3 +3422,190 @@ cosmetic here, but it is inaccurate and worth tidying separately.
 **This fixes the stuck UI, not VoLTE.** SMS over IMS cannot work on a 1.0
 IImsRadio -- the method does not exist -- and none of this touches the voice
 path, where `ims_rte` is still 0 and calls still fall back to CS.
+
+## `ims_rte` unblocked: a single unset Android property was the gate
+
+`ims_rte` is no longer 0. It reaches **3 with confidence 1**, reliably, within
+about twelve seconds of a rild restart. The gate was one unset property.
+
+### The chain, read out of the binary
+
+Three functions, no guessing. `qcril_qmi_nas_set_registered_on_ims` is the only
+runtime writer of the flag `update_ims_rte` consults:
+
+```
+qcril_qmi_nas_set_registered_on_ims
+  0062c570  bl    qcril_qmi_nas_is_voip_enabled
+  0062c57c  cmp   w8(#1), w0
+  0062c580  b.ne  #0x62cef0            ; != 1 -> return WITHOUT storing
+  ...
+  0062c8a4  ldr   w9, [sp, #0x64]      ; the "registered" argument
+  0062c8a8  str   w9, [x8, #0x624]     ; nas_cached_info+0x624
+  0062c8ac  bl    update_ims_rte       ; immediately
+
+qcril_qmi_nas_is_voip_enabled
+  00715a64  str   wzr, [sp, #0x7c]     ; return value initialised to 0
+  00715a74  ...   "persist.vendor.radio.is_voip_enabled"
+  00716440  ldr   w0, [sp, #8]         ; returns 0 unless the property parses non-zero
+
+update_ims_rte
+  004ff5dc  ldr   w9, [x8, #0x624]
+  004ff5e0  cbz   w9, #0x4ff600
+  004ff5f4  str   #3, [x9, #0x434]     ; ims_rte = 3, confidence 1
+  L4ff600:  str   wzr, [x9, #0x434]    ; ims_rte = 0, confidence 4
+```
+
+`persist.vendor.radio.is_voip_enabled` was **unset**. So `is_voip_enabled`
+returned its zero-initialised default, `set_registered_on_ims` returned before
+the store, the flag kept the value `qcril_qmi_nas_init` gave it at `0x4627f0`
+(`str wzr, [x8, #0x624]`), and `ims_rte` was pinned at `0 confidence 4` — a
+settled belief, which is why it never wavered across 555 samples.
+
+`setprop persist.vendor.radio.is_voip_enabled 1` produced `new irte 3 with
+confidence 1` on the first registration afterwards.
+
+Zero hits for `is_voip_enabled` in eleven years of `#sailfishos-porters`. There
+is no prior art for this one.
+
+### Three earlier claims in this document are wrong
+
+**`update_ims_rte` has four callers, not one.** `xrefs.py` over `.text`:
+
+```
+0x4ff2e4: 4 caller(s)
+   bl from 0x4f2344
+   bl from 0x5c0f64
+   bl from 0x62c8ac      <- set_registered_on_ims, the only one that writes the flag
+   bl from 0x6b5950
+```
+
+The other three are an identical recompute block (`0x4f68d8`, `0x4f9c8c`,
+`update_ims_rte`, `0x70f168`, `0x4ff924`) that only re-reads the flag after a
+NAS state change. So "qcril learns registered-on-IMS from the WMS transport
+indication" was the wrong shape: the indication does feed
+`set_registered_on_ims`, but the property gate is what decided the outcome.
+
+**There is no early return inside `update_ims_rte`.** The open caveat — that
+only the block at `0x4ff5d4` had been read and an earlier return was likely — is
+disproven. `0x4ff5d4` is the join point after the entry-logging block:
+
+```
+004ff304  b.eq  #0x4ff318      ; logging on  -> emit "function entry"
+004ff314  cbz   w9, #0x4ff5d4  ; logging off -> skip straight to the body
+```
+
+The function body runs on every call. The early return was one frame up, in the
+caller.
+
+**The transport indication does fire.** This document said it never does, with
+"zero occurrences". The name it was searched under,
+`qcril_sms_process_transport_nw_reg_info_ind`, does not exist in this build; the
+real one is `qcril_sms_process_transport_layer_info_ind`, and it fires — at the
+same millisecond as the flag write:
+
+```
+08:48:11.204  set_registered_on_ims: registered: 1
+08:48:11.204  new irte 3 with confidence 1
+08:48:11.205  transport layer reg info value 1
+```
+
+### And one wrong turn today, recorded so it is not repeated
+
+A single line read as though the network were refusing IMS voice:
+
+```
+... is voice supported on lte dyn 0, setting 1
+```
+
+Counting the whole window instead of one line says the opposite:
+
+```
+ 4  is voice supported on lte dyn 0, setting 1
+32  is voice supported on lte dyn 1, setting 1
+```
+
+The network does advertise IMS voice over PS. The NV side is correct too:
+`voice_domain_pref` 3 (PS_PREFERRED), `ue_usage_setting` 0 (voice-centric),
+`IMS_enable` 1. This hypothesis is dead and should not be revived.
+
+## Where VoLTE actually stands now
+
+Everything upstream of the dial is right, and verified in one clean capture:
+
+| Layer | State |
+|---|---|
+| `persist.vendor.radio.is_voip_enabled` | 1 |
+| `ims_rte` | **3, confidence 1** — before, during and after the dial |
+| IMS registration | `ims_registration_network: 14` (over LTE) |
+| Network EPS feature bit | IMS voice over PS **supported** |
+| `voice_domain_pref` | 3, PS_PREFERRED |
+| The call | still **CS** |
+
+The dial itself:
+
+```
+09:08:05.107  new irte 3 with confidence 1
+09:08:08.052  qcril_qmi_voice_request_dial
+09:08:08.055    .. call type set 0 emer cat 0
+09:08:08.065  is_call_has_ims_audio: jbims: 1, is cs call: 1
+09:08:09.300  new irte 3 with confidence 1
+```
+
+qcril was asked for a **CS voice call**, and obliged. The decision is ofono's,
+and it is made in `binder_voicecall_can_ext_dial()`:
+
+```c
+return self->ext && (!(binder_ext_call_get_interface_flags(self->ext) &
+    BINDER_EXT_CALL_INTERFACE_FLAG_IMS_REQUIRED) ||
+    (self->ims_reg && self->ims_reg->registered &&
+     (self->ims_reg->caps & OFONO_IMS_VOICE_CAPABLE)));
+```
+
+`qti_ims_call.c` sets `IMS_REQUIRED`, so the whole thing turns on
+`ims_reg->registered` — which is `state == BINDER_EXT_IMS_STATE_REGISTERED` —
+**at the instant of the dial**. The call went out over `binder_voicecall.c`, the
+CS path, because that flag was false at that moment.
+
+It is false intermittently because the registration flaps. The failure is a SIP
+timeout, and its position in the log settles the direction of causality:
+
+```
+binder_voicecall_info_new() [id=1,status=0,...]      <- call ends
+ims:imsradio0: QtiRadioRegInfo state:1 radiotech:15 error_code:408
+Call 1 ended with cause 16 -> ofono reason 2
+```
+
+The 408 arrives **after** the call ends, not before it. So it is a consequence
+of the CSFB tearing down LTE, not the cause of the CS routing — and the two
+compound: a CS call kills IMS, and the next dial is that much more likely to
+land in a gap. One dial inside a good window should break the cycle.
+
+### What is left
+
+1. Dial while `ims_reg->registered` is true and confirm the call goes over IMS.
+2. Make the registration hold, so that window is not a matter of luck. This is
+   the same ground as "make ofono activate the IMS context automatically",
+   though note the modem runs its own IMS PDN through `imsdatadaemon`:
+   registration reached `state:0` at 08:48 with ofono's `context3` still
+   inactive, so activating it is not the trigger and only confounded one test.
+3. Make the property permanent in droid-config rather than a live `setprop`.
+
+## A tooling fault that invalidates past greps of this file
+
+`grep` in this workspace is a shell function wrapping `ugrep -I`, which skips
+binary files. This document contained **one NUL byte** — pasted in with an EFS
+dump, inside `"/Data_Profiles/Profile2\0"` at line 529 — so ugrep classified the
+whole file as binary and skipped it, silently, exit 1, no warning:
+
+```
+$ grep -c ims_rte docs/rca/volte-registration-change-is-test-mode.md
+$ echo $?
+1
+$ python3 -c "print(open(...).read().count('ims_rte'))"
+31
+```
+
+Any `grep` over this file returned nothing regardless of content. The NUL has
+been replaced with a literal `\0`. This is the same class of fault as the
+`transport_nw_reg_info` search above: **a zero-hit result is only evidence once
+the instrument has been shown to be able to hit at all.**
