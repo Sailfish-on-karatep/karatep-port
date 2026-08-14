@@ -3609,3 +3609,78 @@ Any `grep` over this file returned nothing regardless of content. The NUL has
 been replaced with a literal `\0`. This is the same class of fault as the
 `transport_nw_reg_info` search above: **a zero-hit result is only evidence once
 the instrument has been shown to be able to hit at all.**
+
+## Why irte 3 is still not enough: the dial itself deregisters IMS
+
+With the property gate open, `irte` reaches 3 — but it lived only **4.7 seconds**
+and then stayed down until the next rild restart. Measured passively, with no
+calls at all, so nothing in the test perturbed it:
+
+```
+09:37:30.418  registered: 1 -> irte 3, transport value 1
+09:37:35.153  registered: 0 -> irte 0, transport value 0
+```
+
+That corrects an earlier reading in this session. The collapse seen "about two
+seconds after each dial" was not caused by dialling; it was this 4.7-second
+lifetime expiring. The dial was innocent at that stage.
+
+### sms_domain_pref: PS_PREFERRED was letting the modem give up
+
+`irte` is fed by the WMS transport registration, and `sms_domain_pref` was 1 —
+`PS_PREFERRED`, which explicitly permits the modem to abandon SMS over IMS and
+fall back to CS. Setting it to 3 (`PS_ONLY`) changed the lifetime from 4.7
+seconds to minutes: the transport came up and simply stayed up for the rest of a
+160-second capture, with `irte 3` as the final state.
+
+### The SMSC: the "correct" value is the one that breaks it
+
+`qp_ims_sms_config` holds three 128-byte ASCII fields — SMSC, the
+`+g.3gpp.smsip` feature tag, and `0x00000400`. The SMSC was `10138`, Reliance
+Jio's, inherited from the retargeted Jio carrier config, on a BSNL SIM. Setting
+it to BSNL's own `+919442099997` looked obviously right and is wrong:
+
+| SMSC in `qp_ims_sms_config` | transport indications | `irte` |
+|---|---|---|
+| `+919442099997` (BSNL's own) | **0** in three minutes | 0 throughout |
+| `10138` (Jio's) | `value 1`, no drop | 0 → **3**, held ~2 min |
+
+Reverting brought the transport straight back, so this is a clean A/B and not a
+one-sample story. Interestingly the BSNL value did make the *IMS registration*
+itself stable for the first time — `imsa ... Status 2` held for over two minutes
+where it used to collapse in seconds — while killing the SMS transport that
+`irte` actually depends on. Two signals moving in opposite directions off one
+byte-level change. `10138` is kept, because `irte` is what routes the call.
+
+### What still blocks the call
+
+With `is_voip_enabled=1`, `sms_domain_pref=3`, the Jio SMSC, `irte` holding at 3
+for minutes, **and** the IMS PDN active on `rmnet_data1` with a real address, a
+call still goes CS. The dial and the deregistration are locked together:
+
+```
+09:58:47.648  transport up   (value 1)  -> irte 3
+09:58:51.052  SRV TYPE 9  (the dial)
+09:58:51.345  transport DOWN (value 0)  <- 293ms after the dial
+09:59:09.933  transport up again
+```
+
+An earlier attempt had the drop 320 ms *before* the logged dial and this one
+293 ms *after*. Landing within a third of a second of the dial twice, when the
+transport otherwise holds for minutes, is not coincidence: **attempting the call
+is what deregisters IMS.**
+
+The most likely reading is that the deregistration is a *symptom* rather than a
+cause — the modem decides it cannot carry this call on IMS, initiates CSFB, and
+moving off LTE takes the IMS registration with it, all within ~300 ms. If that
+is right then `irte = 3` at dial time is necessary but not sufficient, and the
+modem is overriding it for a reason not yet visible in the RIL log. That is the
+next thing to chase, and it should be treated as a hypothesis, not a finding.
+
+### Side effect worth knowing
+
+`sms_domain_pref = 3` forbids SMS over CS, and SMS over IMS cannot work on a 1.0
+`IImsRadio` (`sendImsSms` is a 1.2 method). So PS_ONLY breaks outgoing SMS
+entirely. It is a debugging setting, not a shipping one, and has been put back
+to 1. Any future work here has to hold both facts at once: `irte` wants PS_ONLY,
+messaging wants PS_PREFERRED.
