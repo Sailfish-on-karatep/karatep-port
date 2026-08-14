@@ -3809,3 +3809,44 @@ The repository is deliberately left with the dial change **reverted**
 (`4cd3031`), so a rebuild produces the safe plugin. The change is right and
 should be reapplied, but only alongside a fix for the SDP failure — on its own
 it converts working CS calls into failing IMS ones.
+
+## Jio's config is the outlier on exactly the things SDP is built from
+
+"SDP parse failed" comes from the modem's own IMS stack — the string is in none
+of `/vendor/lib64`, `/vendor/lib` or `/vendor/bin`, so it cannot be traced by
+disassembly on this side. What can be checked is the configuration the SDP is
+built from, and we are running Reliance Jio's config retargeted at BSNL.
+
+`scripts/mcfg/jiodiff.sh` compares every `/nv/item_files/ims/*` item in
+`rjil.mbn` against the seven other configs in the modem image. Jio stands alone
+on **21** of them, and the media-related ones are:
+
+| item | Jio | every other config | what it controls |
+|---|---|---|---|
+| `qipcall_precondition_enable` | 0 | **1** (5/5) | `a=curr:qos` / `a=des:qos` / `a=conf:qos` in the SDP |
+| `qipcall_qos_enabled` | 0 | **1** (5/5) | dedicated bearer reservation |
+| `qipcall_session_level_media_bw_enabled` | 0 | **1** | session-level `b=AS:` bandwidth lines |
+| `ims_scr_amr_nb_enabled` | 0 | **1** (4/4) | source-controlled rate / DTX, AMR-NB |
+| `ims_scr_amr_wb_enabled` | 0 | **1** (4/4) | the same for AMR-WB |
+| `qp_ims_media_config` | `06 78 05…` | `01 78 05…` | the media configuration itself |
+
+This is consistent with what Jio's network is: VoLTE-only and famously not using
+SIP preconditions. Every one of those items removes attributes from the SDP the
+UE offers, and a modem told not to use preconditions, receiving an answer full
+of `a=curr`/`a=des`/`a=conf` lines, is a plausible reading of "SDP parse
+failed" — a *parse* error rather than a negotiation failure, which would have
+come back as SIP 488 instead.
+
+The five booleans have been set to the consensus values in EFS. `qp_ims_media_config`
+is left alone for now: it is a large struct rather than a flag, and changing it
+wholesale would confound the next test.
+
+One hypothesis died here. `qipcall_codec_mode_set` and
+`qipcall_codec_mode_set_amr_wb` are `00000000` in Jio's config, which looked
+like "no AMR modes offered" and therefore a direct cause of a malformed
+`a=fmtp` line. They are `00000000` in four of the six configs that carry them,
+so zero is the ordinary default and not the bug.
+
+These are NV writes made while the dial change is reverted, so calls are still
+placed on CS and nothing about them is user-visible yet. They only matter once
+the dial path is put back.
