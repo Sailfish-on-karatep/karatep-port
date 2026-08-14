@@ -4295,3 +4295,84 @@ them at 1. Zero, with a working bearer and the dial fix in place, is untested.
 The 28 ms of silence between the PRACK leaving and the CANCEL fits: with
 preconditions in play the modem's next move is to reserve resources and send an
 UPDATE, and that is exactly the step it never takes.
+
+### Preconditions eliminated, as a group, by readout
+
+All five media booleans back to Jio's zeros. The capture confirms the change
+reached the wire: **zero** `a=curr`/`a=des`/`a=conf:qos` lines in either
+direction, and our offer lost its session-level `b=` block as well. The answer
+came back stripped to its minimum:
+
+```
+v=0
+o=LucentPCSF 817657360 817657360 IN IP4 imsgroup-322-0000002.tns01.ims.mnc080.mcc404.3gppnetwork.org
+s=-
+c=IN IP4 61.2.220.148
+t=0 0
+m=audio 40584 RTP/AVP 97 96
+c=IN IP4 61.2.220.148
+a=rtpmap:97 AMR/8000/1
+a=fmtp:97 mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1
+a=rtpmap:96 telephone-event/8000/1
+a=fmtp:96 0-15
+a=sendrecv
+```
+
+and the call failed identically: `INVITE → 100 → 183 → PRACK → CANCEL`,
+end cause 373, `SDP parse failed`. Restored to `01`.
+
+So preconditions, QoS, session-level bandwidth and AMR source-controlled rate
+are all out, together, and the modem's next-move-is-an-UPDATE theory with them.
+What fails is the *base* SDP answer, with nothing negotiated on top of it.
+
+### `qipcall_config_items` is not a lever either
+
+The one substantial IMS item never varied, held back because it was bisected as
+what makes this modem accept IMS at all. Byte-diffing it across the configs
+shows Jio departs from the ntel/gcf consensus on exactly two bytes:
+
+| offset | rjil (live) | ntel | gcf | 3uk |
+|---|---|---|---|---|
+| 0 | `1a` | `19` | `19` | `0d` |
+| 2 | `01` | `00` | `00` | `00` |
+
+Offset 0 reads as a count — 26, 25, 13 — with the array following it, so Jio's
+only distinguishing content is one extra enabled entry and the count that
+covers it. That is almost certainly the IMS-enabling difference itself rather
+than anything about media, and changing it trades registration for nothing.
+
+### Where this actually stands
+
+Everything reachable from NV has now been eliminated, and eliminated properly —
+by watching the wire rather than by argument:
+
+- the dial path (the call leaves as `QMI call_type 2`)
+- registration (AKA succeeds, `200 OK`, `Expires: 86400`)
+- the IMS bearer and its address
+- fourteen Jio-outlier items aligned to consensus
+- the audio codec list, blanked
+- `qp_ims_media_config`, aligned
+- `qipcall_codec_mode_set`, confirmed on the wire and reverted
+- all five media booleans, confirmed absent from the wire and reverted
+- `qipcall_config_items`, by inspection
+
+What remains is in BSNL's answer and we have no way to change it: the `o=` line
+declaring `IN IP4` and then a 58-character FQDN, `a=fmtp` with spaces after its
+semicolons, `telephone-event/8000/1` carrying a channel count our offer does not,
+and `c=` repeated at session and media level.
+
+There is context, though it is forum-grade rather than root-cause. BSNL VoLTE
+has a documented history of exactly this symptom on shipping handsets from major
+vendors — outgoing calls dropping immediately and callers hearing "switched off"
+when VoLTE is enabled, resolved by turning VoLTE off. That is precisely what
+happened here when the dial fix was first shipped. It does not tell us which
+line breaks the parser, but it does mean this modem is not uniquely bad at
+BSNL's core, and it is consistent with an interop problem on the network side
+that newer basebands work around.
+
+**Conclusion: VoLTE on karatep reaches media negotiation and stops there.** The
+call is genuinely VoLTE, the network genuinely offers a session, and the modem's
+IMS stack — `MSM8937.LA.2.0-00440-STD.PROD-1`, November 2017 — rejects a
+syntactically valid SDP answer for a reason it will not disclose and that no
+configuration reachable from EFS changes. The dial fix stays reverted, so calls
+are placed on CS and work.
