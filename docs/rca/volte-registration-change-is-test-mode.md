@@ -3850,3 +3850,63 @@ so zero is the ordinary default and not the bug.
 These are NV writes made while the dial change is reverted, so calls are still
 placed on CS and nothing about them is user-visible yet. They only matter once
 the dial path is put back.
+
+### The media fixes were not sufficient
+
+Tested with everything aligned for the first time: `irte 3`, the dial change in
+place, all five media booleans at the consensus values, and the IMS PDN carrying
+a **real IPv4 address** (`100.119.86.112/27`) rather than the IPv6 link-local
+the earlier run had. The call still ended:
+
+```
+QMI call_type: 2          (three times -- it is a VoLTE call)
+end_reason_text (UTF-8): SDP parse failed
+```
+
+So both hypotheses recorded above are dead:
+
+- **Not a missing media address.** The bearer had a routable IPv4 and the result
+  was identical.
+- **Not the five media booleans.** Preconditions, QoS, session-level bandwidth
+  and AMR SCR are all now enabled and the parse still fails.
+
+BSNL's own carrier configuration, pulled from the reference handset, does at
+least confirm the direction was right and gives the exact media expectations:
+
+```
+imsvoice.voice_qos_precondition_supported_bool = true
+imsvoice.amrwb_payload_type_int_array = [97, 98]
+imsvoice.amrnb_payload_type_int_array = [99, 100]
+imsvoice.dtmfwb_payload_type_int_array = [101]
+imsvoice.dtmfnb_payload_type_int_array = [102]
+  97 = {}                                       bandwidth-efficient
+  98 = {amr_codec_attribute_payload_format = 1}  octet-aligned
+```
+
+BSNL offers both octet-aligned and bandwidth-efficient variants of each codec.
+Jio's `qipcall_audio_codec_list` is `AMR_WB_OA;AMR_WB_BE;AMR_OA;AMR_BE` — the
+same four codecs, so the content matches and ordering alone would not produce a
+*parse* error.
+
+`qp_ims_media_config` is also no longer the outlier it appeared to be. Its
+leading byte is `06` in Jio's config **and** in gcf and ntel; only 3uk ships
+`01`. The real differences are further in (`…02 00` vs `…00 00` at offset 18,
+`3c 00 3c 00` vs `3c 00 00 00` at 28, `03` vs `00` at 39) and are timers whose
+meaning is not recoverable without the struct definition.
+
+### Where this leaves the approach
+
+Retargeting Reliance's commercial config at BSNL has now cost more than it has
+bought. It was chosen because it was the only configuration on this handset
+known to have produced working VoLTE on this modem, and it did get IMS
+registered — but it carries Jio's IMS behaviour wholesale, and Jio's IMS is
+unusual: no preconditions, no QoS reservation, no session-level bandwidth, no
+AMR SCR, its own SMSC, and `qp_ims_ut_config = jionet`. Six of those have had to
+be unpicked by hand, one at a time, each costing a service window.
+
+The principled alternative is the one already on the list as "replace the
+retargeted Jio config with a minimal BSNL-correct one": build from
+`ROW_Generic_3GPP` with IMS enabled — `row_v61.mbn` already exists — which has
+none of Jio's IMS quirks, and add only what BSNL demonstrably needs. That is a
+larger change than another single NV write, but it stops the sequence of
+one-item-at-a-time corrections against a baseline that is wrong by construction.
