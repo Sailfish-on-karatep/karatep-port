@@ -461,6 +461,58 @@ capture either way** — that pair is a different `med_arr` and is background
 noise at every IMS bring-up, not a symptom. Tested without placing a single
 call, since the signal appears at registration.
 
+## The last config levers, tested rather than reasoned about
+
+Four hypotheses were run to ground with live calls. All four are negative, and
+one of them corrects a belief this investigation carried for several sessions.
+
+**`qipcall_config_items` is not the registration gate.** It was the last item
+still byte-identical to `rjil.mbn`, and it was held back — and then dismissed —
+on the inspection argument that byte 0 is a count (26 for Jio, 25 for everyone
+else) and Jio's extra entry must be what makes this modem accept IMS, so
+changing it would "trade registration for nothing". Swapped to the `ytl`/`smtf`
+consensus (five bytes differ: offsets 0, 2, 301, 302, 437), IMS came straight
+back: `ims_registered: 1`, `new irte 3`. The assumption was simply wrong.
+
+It changed nothing else either. The INVITE still advertises
+`Supported: timer,100rel,replaces,precondition,histinfo,tdialog`, unchanged; the
+call still died `INVITE → 100 → 183 → PRACK → CANCEL` with cause 373 and
+`SDP parse failed`; and an incoming call was still refused `488` at 28 ms with
+the SDP parser still running once per call. Registration was measurably *worse*
+— three REGISTERs went unanswered inside five minutes — so Jio's value was
+restored.
+
+**`qp_ims_sip_extended_0_config` does not build the `Supported` list either.**
+Its first byte varies by operator — `0x0a` for 3uk, `0x0b` live and for
+gcf/ntel/smtf/ytl, `0x11` for rjil — which reads like a count of enabled SIP
+extensions, and 3uk's is the shortest list on the handset and so the likeliest
+to omit `100rel`. Written and dialled: `k:` unchanged, cause 373 again.
+
+So the `Supported` list is not reachable from NV. Two independent candidates
+tested, both negative, and no third has been identified. `100rel` remains the
+best available explanation for why every SDP answer this device receives arrives
+in a response rather than a request — but there is no lever for it, which makes
+it unfalsifiable here rather than merely untested.
+
+**The blanked codec list does not explain the incoming `488`.** This was the one
+genuinely untested media input: `qipcall_audio_codec_list` is 128 zero bytes,
+one of only three IMS items matching no carrier config, and it is empty because
+this investigation blanked it and never restored it. It had been cleared against
+*registration* only, and `488 Not Acceptable Here` is literally "no codec in
+common" — the modem does parse the incoming offer before refusing it, and BSNL
+offers AMR, AMR-WB, G729, PCMA and PCMU. Restored to Jio's
+`AMR_WB_OA;AMR_WB_BE;AMR_OA;AMR_BE`, re-registered, and called: still `488`,
+still `Content-Length: 0` in the refusal, so not even a counter-offer.
+
+### Test-harness note: the device can dial itself
+
+`org.ofono.VoiceCallManager.Dial` over the system bus places an outgoing call
+with no one at the handset, and `HangupAll` six seconds later stops the CS
+fallback from completing a real ringing call — the VoLTE INVITE has already
+failed by 1.2 s. Every outgoing test above ran unattended. This removes what had
+been the binding constraint on the whole investigation, which is that each
+experiment cost a human placing calls. `scripts/qmi/cfgdial.sh` is the pattern.
+
 ## Both directions fail, but not in the same place
 
 Both directions fail, and for a long time that symmetry was read as evidence of
@@ -638,6 +690,10 @@ Written for this investigation, useful to any Qualcomm porter:
 | `scripts/qmi/nvsweep.sh` | compares every live `/nv/item_files/ims/*` value against all eight carrier configs and reports only the disagreements |
 | `scripts/qmi/mediacfg.sh` | byte-compares `qp_ims_media_config` across configs and against EFS |
 | `scripts/qmi/codeclist.sh` | the codec-list measurement: writes, captures a re-registration, restores generated values |
+| `scripts/qmi/cfgswap.sh` | swaps `qipcall_config_items` to the consensus value and rolls back automatically if IMS does not return |
+| `scripts/qmi/cfgdial.sh` | unattended outgoing VoLTE test — the device dials itself over D-Bus and hangs up before CS fallback completes |
+| `scripts/qmi/sipext.sh` | swaps `qp_ims_sip_extended_0_config` and dials, to see whether the INVITE's `Supported` list moves |
+| `scripts/qmi/incodec.sh` | restores the codec list and captures an incoming call against it |
 
 The device-side cost of full-spectrum capture is what forces the design: 198
 KB/s with F3 and equip-1 logs, about 1 MB/s with all sixteen log masks during a
