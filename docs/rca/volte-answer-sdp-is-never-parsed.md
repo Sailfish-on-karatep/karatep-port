@@ -1,10 +1,12 @@
 # VoLTE: the modem never parses BSNL's answer SDP
 
-**Status:** the failure is located — the modem aborts the call without ever
-running its SDP parser on BSNL's answer — but the instruction that decides the
-abort is emitted as a QSR-hashed F3 record, and the string database needed to
-read it does not ship in the firmware. Two earlier conclusions of this document
-are retracted below.
+**Status:** the failure is located — on outgoing calls the modem aborts without
+ever running its SDP parser on BSNL's answer — and an F3 capture of incoming
+calls shows this is not a general property of the modem: on the incoming path
+the same parser *does* run. That asymmetry is the sharpest structural fact in
+this investigation. The instruction that decides each abort is emitted as a
+QSR-hashed F3 record, and the string database needed to read it does not ship in
+the firmware. Two earlier conclusions of this document are retracted below.
 
 VoLTE on karatep registers correctly, dials correctly, and dies during what
 looks like media negotiation. Outgoing calls end ~35 ms after BSNL's
@@ -48,7 +50,65 @@ investigation ran against the *contents* of the SDP — codec narrowing, bandwid
 lines, `fmtp` values, `telephone-event` channel counts — was aimed at a stage the
 modem never reaches.
 
-## What actually happens in the window
+## The parser runs on incoming calls and not on outgoing ones
+
+The incoming path was captured with F3 enabled for the first time: two calls,
+INVITE to `488 Not Acceptable Here` in **27 ms** and **29 ms**, with no PRACK, no
+preconditions and no CANCEL. It behaves differently from the outgoing path in
+exactly one structural way, and it is the important one.
+
+`qvp_sdp_parser_util.c` — the SDP parser proper — fires **once per incoming
+call**, six milliseconds before the `488`:
+
+```
+20.757  qipcalldialog.c:5258      [update_peer_caps] Tags not present in Contact, so ignore
+20.757  qipcallh.c:22317          [updating call_ptr with dialog_id: TEMP_INCOMING_DIALOG]
+20.757  qimfif.cpp:8116           qimfif_get_contact: contact hdr = <sip:pcgw-tcsp…>
+20.757  qvp_sdp_parser_util.c:2015  [g_l_s]pppppppppppppppppppppppppppppppppppppppppppppppppp
+20.757  qvp_sdp_parser_util.c:2018  [g_t_s]--------------------------------------------------
+20.757  qvp_app_oa_api.c:2747     len of str printed exceeded dst str len50
+20.763  sipConnection.cpp:2940    OutGoing:LogSipMsg Method: 2 RespCode: 488
+```
+
+Across the three captures held:
+
+| capture | duration | events | `qvp_sdp_parser_util.c` records |
+|---|---|---|---|
+| outgoing calls | 420 s | 2 full call attempts | **0** |
+| registration control | 200 s | 2 full IMS registrations | **0** |
+| incoming calls | 300 s | 2 incoming INVITEs | **4** (2 per call) |
+
+So the parser is not dead code, not masked out, and not unreachable on this
+build. It runs when an offer arrives and does not run when an answer arrives.
+Whatever kills an outgoing call happens **before** the answer reaches the
+parser, which is why `SDP parse failed` is a mislabel there; the incoming
+rejection, by contrast, comes *after* a parse.
+
+The two parser records are themselves casualties of the print helper. Each
+prints exactly fifty fill characters — fifty `p`, then fifty `-` — rather than
+any SDP content, and `qvp_app_oa_api.c:2747` fires immediately afterwards. The
+consistent reading is that the helper detects an over-length source, logs the
+complaint and leaves the destination's fill pattern in place rather than copying
+a truncated prefix. That also confirms 2747 as a generic string helper: it fires
+adjacent to dialog bookkeeping on one path and adjacent to the SDP parser on the
+other.
+
+**The decision itself is still hidden.** In the 6 ms and 4 ms between the last
+parser record and the `488`, subsystem 51 emits **122** and **230** QSR-hashed
+records respectively and nothing in plaintext. Same wall as on the outgoing
+path, in a much smaller window.
+
+Two side observations from the same capture:
+
+- **IMS registration is churning.** In 300 seconds the device re-registered
+  twice, unprompted, each time landing on a different local address
+  (`…22.107:8995` → `…245.74:8996` → `…75.32:8997`), roughly 35 s after each
+  failed call. The IMS PDN is being torn down and rebuilt, which no earlier
+  capture was long enough to show.
+- **QSherlock records the fallback.** `CALL_DROP` fires at each `488`, followed
+  ~13 s later by `FULL_SRV` — the CS fallback that makes the call ring at all.
+
+## What actually happens in the outgoing window
 
 Taking the interval from the `183` to the start of `CANCEL` assembly, for both
 calls, and keeping only the `file:line` records that fire in **both** windows and
@@ -121,7 +181,10 @@ Two independent checks confirm it:
 other call sites report destination sizes of 3000, 204, 44 and 24 bytes, and
 line 1117 reports the identical kind of overflow against a 204-byte buffer at
 INVITE-build time on every call, including in the successful registration
-capture, harmlessly.
+capture, harmlessly. The incoming capture settles this: 2747 fires there twice
+per call as well, once next to dialog bookkeeping and once next to
+`qvp_sdp_parser_util.c`. One helper, two unrelated callers, no causal role in
+either direction.
 
 ## The blocker: 88% of the modem's F3 output is hashed
 
@@ -180,22 +243,34 @@ without the vendor string database.
 26.5% of its whole-capture output — but zero in call 2, so it is not part of the
 reproducible path.)
 
-## It fails symmetrically
+## Both directions fail, but not in the same place
 
-An incoming VoLTE call is refused with `488 Not Acceptable Here` 28 ms after the
-INVITE. `488` is precisely "your SDP is not acceptable to me". That symmetry
-rules out every hypothesis living in the answer-specific path — PRACK handling,
-precondition and UPDATE sequencing, the 183 early-media flow — because the
-incoming rejection involves none of them.
+Both directions fail, and for a long time that symmetry was read as evidence of
+one shared cause. With F3 on both paths, that reading no longer holds at the
+level of mechanism.
 
-It also eliminated two suspects outright: the incoming offer contains **no**
-`telephone-event/8000/1` channel count and **no** duplicate `c=` line — the two
-oddities an earlier revision had flagged — and was rejected anyway.
+| | outgoing | incoming |
+|---|---|---|
+| verdict | `CANCEL`, QMI cause 373, `SDP parse failed` | `488 Not Acceptable Here` |
+| time from peer SDP to verdict | ~35 ms | 27 / 29 ms |
+| SDP parser runs? | **no** | **yes**, 6 ms before the verdict |
+| what precedes the verdict | PRACK sent, then abort 1 ms later | parse, then refusal |
 
-**The incoming case remains the cleanest un-run experiment.** INVITE to 488 is
-28 ms with no PRACK, no preconditions, no CANCEL and no dialog-id concatenation,
-so it should isolate the same decision with far less around it. It has still not
-been captured with F3 enabled.
+`488` is precisely "your SDP is not acceptable to me", and on the incoming path
+that is at least an honest answer: the modem looked at the offer and declined it.
+On the outgoing path the same complaint is issued about an answer the modem
+never read.
+
+What the symmetry does still buy is elimination. The incoming rejection involves
+no PRACK, no preconditions, no early-media flow and no dialog-id concatenation,
+so none of those can be necessary to the failure. It also cleared two suspects
+outright: the incoming offer contains **no** `telephone-event/8000/1` channel
+count and **no** duplicate `c=` line — the two oddities an earlier revision had
+flagged — and was rejected anyway.
+
+Whether one fault produces both verdicts, or two faults do, is open. A single
+capability mismatch evaluated at different points in the two flows would explain
+it; so would two unrelated defects. Nothing measured so far distinguishes these.
 
 ## The instrument was wrong three times
 
@@ -276,16 +351,25 @@ failed call. Low volume, and it carries the event but not the reason.
 
 ## Next measurements
 
-1. **F3 during an incoming call.** 28 ms, no PRACK, no preconditions, no CANCEL.
-   The cleanest window in which to catch the same decision. Costs one inbound
-   call and is the only cheap experiment left.
-2. **Obtain the QSR string database for `MSM8937.LA.2.0-00440-STD.PROD-1`.**
-   Without it, 493 records at the decision point are permanently opaque. It ships
-   with QXDM/QCAT and is not in any firmware bundle held here.
+1. **Obtain the QSR string database for `MSM8937.LA.2.0-00440-STD.PROD-1`.**
+   This is now the only thing standing between the capture and the answer. The
+   decision is taken inside 122–493 hashed subsystem-51 records that are already
+   on disk, in three separate captures; the database is the decoder for them. It
+   ships with QXDM/QCAT and is not in any firmware bundle held here.
+2. **Find why the answer never reaches the parser.** The parser demonstrably
+   works — it runs on every incoming offer. Something on the outgoing path
+   discards or rejects the answer before dispatching it. The `183`'s body is
+   present (`ActualMsgLen: 1486`) and `qimfif_cbs.cpp:1932`
+   (`content length is 0`) fires for the bodiless `100 Trying` but not for the
+   `183`, so the body is at least noticed. What happens to it next is hashed.
 3. **Diff against a working handset on the same SIM.** The same SIM works
    immediately in a Snapdragon 870 handset. A capture of *its* IMS exchange would
    show what BSNL sends when it works, and whether the difference is in what we
    send or in what they send back.
+4. **Investigate the IMS registration churn.** Two unprompted re-registrations
+   with three different local addresses inside 300 s is not normal, was not
+   visible in shorter captures, and may be either a consequence of the failed
+   calls or a second fault sitting underneath them.
 
 ## Why a firmware fix is not available
 
@@ -302,7 +386,9 @@ failed call. Low volume, and it carries the event but not the reason.
   field in BSNL's answer, since their own offer lists `PCMA/8000` and carries no
   `fmtp` at all. Now that the answer is known never to be parsed, changing what
   we offer cannot change the outcome — as the codec-narrowing run already showed
-  empirically.
+  empirically. The incoming path does parse, so what we *advertise* could in
+  principle still matter there; but a device that can only receive VoLTE calls
+  and not place them is not a working phone, so that is not a workaround either.
 
 This is consistent with reports of the same symptom on shipping handsets on
 BSNL — calls dropping immediately, callers hearing "switched off", resolved by
@@ -322,6 +408,7 @@ Written for this investigation, useful to any Qualcomm porter:
 | `scripts/qmi/f3parse.py` | host-side decode of F3: `MSG_F` and `EXT_MSG_F` with arguments substituted, QSR records counted rather than dropped, `ss_id` census |
 | `scripts/qmi/f3probe.py` | enables F3 messaging and censuses what the modem actually emits |
 | `scripts/qmi/f3reg.sh` | the registration control: F3 across a forced deregistration/re-registration, no calls, no NV writes |
+| `scripts/qmi/f3in.sh` | F3 across incoming calls — the 27 ms INVITE-to-488 window, no plugin swap and no NV writes |
 
 The device-side cost of full-spectrum capture is what forces the design: 198
 KB/s with F3 and equip-1 logs, about 1 MB/s with all sixteen log masks during a
