@@ -4376,3 +4376,42 @@ IMS stack — `MSM8937.LA.2.0-00440-STD.PROD-1`, November 2017 — rejects a
 syntactically valid SDP answer for a reason it will not disclose and that no
 configuration reachable from EFS changes. The dial fix stays reverted, so calls
 are placed on CS and work.
+
+---
+
+# SUPERSEDED: the modem did disclose it, and this document's instrument was wrong
+
+The conclusion above — "for a reason it will not disclose" — is wrong, and so is
+the finding it rests on. The root cause is written up in
+[`volte-sdp-exceeds-modem-string-buffer.md`](volte-sdp-exceeds-modem-string-buffer.md):
+**BSNL's SDP carries two fields longer than a 50-byte string buffer in the
+modem's offer/answer API**, in both directions, and the modem reports the
+truncation itself.
+
+Two retractions matter to anyone reading the pages above.
+
+**"This modem emits no F3 debug messaging at all" is false.** It appears at
+lines 1511, 1540, 1721, 2026, 3948, 4004, 4159 and 4168 of this document and is
+load-bearing for several arguments — it is what justified giving up on asking
+the modem why. F3 message masks are a **separate mechanism** from log masks,
+with a separate command (`DIAG_CMD_MSG_CONFIG` 0x7D, sub-command 5), and only
+the log masks had ever been raised. Once set, the modem emits 34,758 messages in
+20 seconds, as whole format strings rather than QSR hashes. Every "the firmware
+will not say" argument in this document should be read as "nobody had asked it".
+
+**Log masks had only ever been raised for equipment id 1.** The sweeps reported
+above cover one sixteenth of the modem's logging. At full spectrum the same
+window yields 739,497 packets and 444 codes across five equipment ids. (That
+sweep's own answer is unchanged and now properly established: no *log code* is
+failure-specific. The answer was in F3, not in the logs.)
+
+Both mistakes have the same shape, and it is worth naming because this document
+made it twice: **a real measurement of the wrong thing, recorded as a property
+of the modem.** In both cases the restriction was adopted for a defensible
+reason — CPU cost on the handset — and then survived as a fact about the
+firmware long after the reason stopped being examined.
+
+Also corrected there: the `b=AS` bandwidth theory (the `ignore AS validation for
+RJIL` bypass is real but fires at INVITE-build time, not on the answer), and the
+claim that the modem image is packed (`modem.b24` is the readable QSR string
+table).
