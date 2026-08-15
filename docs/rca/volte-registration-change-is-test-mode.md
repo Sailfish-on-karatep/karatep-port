@@ -4384,11 +4384,12 @@ are placed on CS and work.
 The conclusion above — "for a reason it will not disclose" — is wrong, and so is
 the finding it rests on. The modem discloses a great deal once asked; the
 investigation continues in
-[`volte-sdp-exceeds-modem-string-buffer.md`](volte-sdp-exceeds-modem-string-buffer.md),
-where the failing window is narrowed to a **50-byte string truncation that fires
-only while BSNL's answer is being processed**. Which string overflows, and
-whether it is what kills the call, are still open there — an interim revision of
-that document asserted both and has been corrected.
+[`volte-answer-sdp-is-never-parsed.md`](volte-answer-sdp-is-never-parsed.md),
+where the failure is located: the modem aborts the call **without ever running
+its SDP parser on BSNL's answer**, so the `SDP parse failed` reason text names a
+function that never executes. Two interim revisions of that document built on a
+50-byte string truncation in the failing window; it turned out to be the debug
+printer truncating its own output, and both have been retracted there.
 
 Two retractions matter to anyone reading the pages above.
 
@@ -4398,7 +4399,9 @@ load-bearing for several arguments — it is what justified giving up on asking
 the modem why. F3 message masks are a **separate mechanism** from log masks,
 with a separate command (`DIAG_CMD_MSG_CONFIG` 0x7D, sub-command 5), and only
 the log masks had ever been raised. Once set, the modem emits 34,758 messages in
-20 seconds, as whole format strings rather than QSR hashes. Every "the firmware
+20 seconds. About one in eight arrives as a whole format string; the rest are
+QSR-hashed and need a vendor string database that does not ship in the firmware.
+Every "the firmware
 will not say" argument in this document should be read as "nobody had asked it".
 
 **Log masks had only ever been raised for equipment id 1.** The sweeps reported
