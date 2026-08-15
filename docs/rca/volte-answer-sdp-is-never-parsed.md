@@ -188,10 +188,17 @@ either direction.
 
 ## The blocker: 88% of the modem's F3 output is hashed
 
-The capture holds **1,920,523** F3 records. Only **228,750** carry inline format
-strings. The other 1.69 M are QSR ("silent reporting") records: an `EXT_MSG_F`
-wrapper in which the format string and filename are replaced by a single 32-bit
-hash placed immediately after `ss_mask`:
+The capture holds **1,920,523** F3 records. Only **227,849** carry inline format
+strings. The other 1,692,674 are QSR ("silent reporting") records, in which the
+format string and filename are replaced by a single 32-bit hash placed
+immediately after `ss_mask`.
+
+**The packet type is the discriminator, exactly.** Every one of the 227,849
+`MSG_F` (`0x79`) records is inline and every one of the 1,692,674 `EXT_MSG_F`
+(`0x92`) records is hashed — 100% and 0%, no overlap. Do not infer the layout
+from the names: on this build it is the *legacy* type that carries whole format
+strings and the *extended* type that carries a hash. An earlier revision of this
+document had that backwards.
 
 ```
 u8 cmd (0x92) | u8 ts_type | u8 num_args | u8 drop_cnt
@@ -202,7 +209,15 @@ u32 args[num_args]
 ```
 
 A parser that expects two trailing NUL-terminated strings silently drops all of
-them, which is what happened here at first.
+them, which is what happened here at first. Worse than dropping: **901 of them
+decoded as plausible inline records**, because their trailing argument bytes
+happened to contain a NUL followed by printable ASCII. One decoded as file
+`oh`, format `5`, appeared exactly once in 420 seconds, and — five milliseconds
+before a call was cancelled — was briefly taken for a unique event. Its frame
+CRC was valid. It was `f101:6482` with args `(…, 2000, …)`, and the `oh` was two
+bytes of an integer. `scripts/qmi/f3parse.py` now keys on the packet type and
+additionally requires the filename to look like a source path; no conclusion in
+this document depended on the 901.
 
 The hashes resolve against a table in **`modem.b14`**, 8 bytes per entry:
 
@@ -219,10 +234,62 @@ this exact build, and no such database is present in the Lenovo QPST package, th
 stock ROM, or any other firmware bundle held here.
 
 **Correction:** an earlier revision of this document called `modem.b24` "the QSR
-string table". That is wrong. `modem.b24` (97 KB, 92% printable) is the
+string table". That is wrong. `modem.b24` (97 KB, 92% printable) is *an*
 **inline** string table — `filename.c:format string\0` pairs, NUL-padded to
-4-byte alignment — holding exactly the strings that arrive already readable on
-the wire. It resolves nothing that is hashed.
+4-byte alignment — holding strings that arrive already readable on the wire. It
+resolves nothing that is hashed.
+
+`modem.b24` is not even the whole inline pool: it holds 1,178 strings, and
+plenty of messages that print in plaintext are absent from it and from every
+other segment (`len of str printed`, `qimfif allow header`). Those live
+compressed in `modem.b21`, whose entropy is 7.91, and are unpacked at load.
+
+**The two tables are disjoint, which kills the obvious shortcut.** If `b14` and
+`b24` overlapped, the filenames in `b24` could bootstrap a `file_index` →
+filename map and every hashed record would gain a module name. They do not: take
+the `(file, line)` pairs of messages known to print inline — seven lines of
+`qipcallsdp.c`, seven of `qvp_app_oa_api.c`, six of `qipcalldialog.c`, eight of
+`qimfif_cbs.cpp` — and intersect the `file_index` candidates for each file's
+lines in `b14`, and every intersection is **empty**. A message is either shipped
+inline or indexed as a hash, never both, so no inline string can name a hashed
+file.
+
+### What the hashes do give: the same three files decide both failures
+
+`file_index` is recoverable even though the filename is not, and it answers the
+open question of whether the two directions share a fault. For every hashed
+`ss_id 51` record in the four failing windows the hash resolves in `b14` —
+**zero unresolved** — and the file indices are:
+
+| window | records | file 101 | file 98 | file 99 |
+|---|---|---|---|---|
+| outgoing call 1 | 272 | 191 | 68 | 13 |
+| outgoing call 2 | 218 | 163 | 43 | 12 |
+| incoming call 1 | 122 | 88 | 27 | 7 |
+| incoming call 2 | 230 | 130 | 84 | 16 |
+
+Three files, the same three, in the same order of dominance, in both directions.
+The windows are 0.0095% (outgoing) and 0.0033% (incoming) of their captures, so
+these are enrichments of 80× to 310× over background. **Whatever refuses an
+incoming offer and whatever cancels an outgoing call are running in the same
+three source files of the IMS call application.** That is evidence for one fault
+with two expressions rather than two unrelated defects.
+
+The instruction traces even share a motif. Both directions run this identical
+thirteen-record sequence, ending at the same inline message:
+
+```
+f98:10107 | f101:310 x2 | f101:1887      (three times)
+f98:5115  | f101:10078  | f98:4760
+INLINE qipcalldialog.c:5258  [update_peer_caps] Tags not present in Contact
+```
+
+after which they diverge. Sixty-nine `file:line` keys are common to all four
+failing windows, but **none of them fires exclusively there**, so there is no
+single hashed record that marks the failure. The nearest miss, `f101:6456`,
+fires exactly once per failure in both directions — but also during
+registration, and its one argument is `2000` or `500`. It is a timer helper, not
+a verdict.
 
 Attributing the hidden records by `ss_id`, using an empirical `ss_id` → module
 map built from the plaintext records, shows where the decision is being made:
@@ -407,7 +474,8 @@ the 12% that survived. Frame CRCs were checked afterwards: **6,545 of 6,545**
 frames in the decisive window pass, and the modem's own `drop_cnt` is zero
 throughout it. Nothing was lost on the wire; it was lost in the decoder.
 
-`MSG_F` / `EXT_MSG_F` inline layout, for anyone decoding these:
+`MSG_F` (`0x79`) inline layout, for anyone decoding these — note this is the
+type that carries strings, not `EXT_MSG_F`:
 
 ```
 u8 cmd_code | u8 ts_type | u8 num_args | u8 drop_cnt
@@ -505,7 +573,7 @@ Written for this investigation, useful to any Qualcomm porter:
 |---|---|
 | `scripts/qmi/sdpraw.py` | raises all 16 log masks **and** the F3 message masks, writes the DIAG driver's batches to disk verbatim — no analysis on the handset |
 | `scripts/qmi/sdprawparse.py` | host-side decode of log packets: HDLC, log headers, SIP reassembly, per-window frame dumps |
-| `scripts/qmi/f3parse.py` | host-side decode of F3: `MSG_F` and `EXT_MSG_F` with arguments substituted, QSR records counted rather than dropped, `ss_id` census |
+| `scripts/qmi/f3parse.py` | host-side decode of F3: inline `MSG_F` with arguments substituted, QSR `EXT_MSG_F` parsed to `(ss_id, line, hash, args)` rather than dropped, `ss_id` census |
 | `scripts/qmi/f3probe.py` | enables F3 messaging and censuses what the modem actually emits |
 | `scripts/qmi/f3reg.sh` | the registration control: F3 across a forced deregistration/re-registration, no calls, no NV writes |
 | `scripts/qmi/f3in.sh` | F3 across incoming calls — the 27 ms INVITE-to-488 window, no plugin swap and no NV writes |

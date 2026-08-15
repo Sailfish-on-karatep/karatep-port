@@ -100,9 +100,31 @@ def frames(buf):
         off += ln
 
 
+_FNAME = re.compile(rb"^[A-Za-z0-9_./+\-]{4,}$")
+
+
 def parse_msg(pkt):
-    """(ss_id, line, file, fmt, args) for an F3 record, or None."""
-    if len(pkt) < 20:
+    """(ss_id, line, file, fmt, args) for an *inline* F3 record, or None.
+
+    On this build the packet type is the discriminator, exactly: across a
+    420-second capture, all 227,849 MSG_F (0x79) records carry inline strings
+    and all 1,692,674 EXT_MSG_F (0x92) records are QSR -- 100% and 0%, no
+    overlap. Do not infer the layout from the name: it is the *legacy* type
+    that carries whole format strings here, and the extended one that carries
+    a hash.
+
+    The filename check below is belt and braces, and it was not always. Before
+    the packet-type split was measured, a QSR record whose trailing argument
+    bytes happened to contain a NUL followed by printable ASCII decoded as a
+    perfectly plausible inline record: one such frame decoded as file "oh",
+    format "5", and was briefly mistaken for a unique event five milliseconds
+    before a call was cancelled. Its CRC was valid; it was f101:6482 with args
+    (…, 2000, …), and the "oh" was two bytes of an integer. 901 records were
+    misread that way. The name test alone would have caught them: real names
+    are source paths, and where the firmware truncates them it does so at 18
+    characters and they stay source-like (qpSipSessionServic, qpSipDispatcher.cp).
+    """
+    if pkt[:1] != b"\x79" or len(pkt) < 20:
         return None
     nargs = pkt[2]
     end = 20 + 4 * nargs
@@ -112,13 +134,30 @@ def parse_msg(pkt):
     args = struct.unpack_from("<%dI" % nargs, pkt, 20) if nargs else ()
     tail = pkt[end:]
     parts = tail.split(b"\x00")
-    if len(parts) < 2:
+    if len(parts) < 2 or not _FNAME.match(parts[1]):
         return None
     fmt = parts[0].decode("ascii", "replace")
     fname = parts[1].decode("ascii", "replace")
-    if not fname or not all(32 <= c < 127 for c in parts[1]):
-        return None
     return ss_id, line, fname.rsplit("/", 1)[-1], fmt, args
+
+
+def parse_qsr(pkt):
+    """(ss_id, line, msg_hash, args) for a QSR record, or None.
+
+    EXT_MSG_F (0x92) on this build: the 32-bit hash sits immediately after
+    ss_mask, where the strings would be, and the arguments follow it. The hash
+    resolves against the table in modem.b14 (u16 file_index | u16 line |
+    u32 hash); the strings themselves ship only in the vendor QXDM database.
+    """
+    if pkt[:1] != b"\x92" or len(pkt) < 24:
+        return None
+    nargs = pkt[2]
+    if nargs > 16 or 24 + 4 * nargs > len(pkt):
+        return None
+    line, ss_id = struct.unpack_from("<HH", pkt, 12)
+    msg_hash, = struct.unpack_from("<I", pkt, 20)
+    args = struct.unpack_from("<%dI" % nargs, pkt, 24) if nargs else ()
+    return ss_id, line, msg_hash, args
 
 
 def render(fmt, args):
