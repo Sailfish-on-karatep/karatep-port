@@ -244,15 +244,72 @@ plenty of messages that print in plaintext are absent from it and from every
 other segment (`len of str printed`, `qimfif allow header`). Those live
 compressed in `modem.b21`, whose entropy is 7.91, and are unpacked at load.
 
-**The two tables are disjoint, which kills the obvious shortcut.** If `b14` and
-`b24` overlapped, the filenames in `b24` could bootstrap a `file_index` →
-filename map and every hashed record would gain a module name. They do not: take
-the `(file, line)` pairs of messages known to print inline — seven lines of
+**Inline messages carry no `file_index`, which blocks the obvious shortcut.**
+Take the `(file, line)` pairs of messages known to print inline — seven lines of
 `qipcallsdp.c`, seven of `qvp_app_oa_api.c`, six of `qipcalldialog.c`, eight of
 `qimfif_cbs.cpp` — and intersect the `file_index` candidates for each file's
-lines in `b14`, and every intersection is **empty**. A message is either shipped
-inline or indexed as a hash, never both, so no inline string can name a hashed
-file.
+lines in `b14`: every intersection is **empty**. An inline message has no entry
+in the hash table, because it needs no hash. So no inline string can be used to
+calibrate what a `file_index` means.
+
+(Stated more carefully than an earlier revision of this document did: it is
+*messages* that are either inline or hashed, not files. A single source file can
+have some of each — `qipcallh.c` prints lines 3363, 22317 and 30143 in plaintext
+while other lines of some large file are hashed.)
+
+### Can the names be recovered from the image at all? Not yet, but not never
+
+`modem.b14` is 5 MB and 35% printable, which is far more than an 8-byte-per-entry
+binary table needs. Mapping it out:
+
+| region | contents |
+|---|---|
+| `0x000000`–`0x000380` | 56 legacy 16-byte descriptors: `u32 line, u32 ss_id, u32 fmt_ptr, u32 file_ptr`, pointers into modem address space |
+| `0x000380`–`0x207020` | the QSR table, ~2 MB, ~260k entries, sorted by line within per-file-group segments |
+| `0x207020`–`0x212ea6` | **a filename array**: 3,038 NUL-terminated names, `rex_os_context.c`, `bit.c`, `crc.c`, `memheap.c`, … |
+| `0x227df4`–… | 386 `ssscr_*` supplementary-service strings, and further string regions to ~`0x4d0000` |
+
+So the firmware does carry a filename array. It is not, however, what
+`file_index` indexes — checked against three subsystems whose modules are known
+from plaintext, and all three are incoherent:
+
+| subsystem | known modules | observed `file_index` | name at that array position |
+|---|---|---|---|
+| 51 | `qipcall*`, `qimfif*`, `qvp_*` | 98–101 | `tdsrf_lm.c`, `tdsirat.c` (TD-SCDMA) |
+| 9501 | `lte_rrc_*` | 442–490 | `srchtc_sm.c`, `outputstream.cpp` |
+| 9509 | `lte_ml1_*` | 530–577 | `rex_tcb.c`, `rcinit_term.c` |
+
+No constant offset reconciles them, and the relative order is wrong for a
+compressed subset (`qipcall*` sits at array 2758 while `lte_ml1_*` sits at 1993,
+the opposite of the observed ordering). There is no offset or lookup array
+between the end of the QSR table and the start of the filename blob — they abut.
+
+An attempt to identify files by line-number fingerprint instead — an inline line
+must be *absent* from its own file's hashed line set while its neighbours are
+present — failed on data quality: a naive 8-byte scan of the 2 MB table picks up
+non-table bytes, and the resulting sets collide with almost every known inline
+line. Delimiting the table's segment structure properly is the prerequisite, and
+it has not been done.
+
+**Other firmware does not substitute.** The two Nokia MSM8937 images held here
+are `MSM8937.LA.3.1.2-00360-STD.PROD-1`; this device is
+`MSM8937.LA.2.0-00440-STD.PROD-1.102262.2.113053.1`. Different Qualcomm release,
+different source tree, so neither line numbers nor file indices correspond.
+
+The realistic routes to the names, in order of cost:
+
+1. **The QXDM/QCAT string database for this exact build.** The legitimate source;
+   Qualcomm licenses it to OEMs and partners. It is not on the device, not in any
+   of the eight carrier configs, and not in the Lenovo QPST package or stock ROM
+   — all checked.
+2. **Finish reversing `modem.b14`.** A bounded task: the container is mapped
+   above, and what is missing is only how `file_index` resolves. Getting it would
+   name the three files that decide both failures, which is most of what is
+   wanted — the format strings would still be absent, but a module name plus a
+   line number is enough to reason about.
+3. **Sidestep it** with a capture from the Snapdragon 870 handset that works on
+   this SIM, which shows what a successful exchange looks like without needing to
+   read this modem's mind.
 
 ### What the hashes do give: the same three files decide both failures
 
