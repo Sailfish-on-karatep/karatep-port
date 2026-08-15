@@ -243,6 +243,100 @@ without the vendor string database.
 26.5% of its whole-capture output — but zero in call 2, so it is not part of the
 reproducible path.)
 
+## The network builds the voice bearer 36 ms after the modem gives up
+
+The outgoing abort is not a timeout. The dedicated QCI-1 bearer BSNL's answer
+asks the UE to confirm *does* get established — just after the CANCEL:
+
+```
+44.983  CANCEL header assembly begins
+44.987  lte_rrc_stm.c   LTE_RRC_RRC_CONNECTION_RECONFIGURATION_DLM
+44.990  CANCEL sent
+45.026  netmgr_tc.c:3208  flow bearer_id=7  priority=7  datarate=42000
+45.026  netmgr_tc.c:458   [0] UDP SRC start port = 50010
+45.026  netmgr_tc.c:462   [0] UDP Dest start port = 39460
+```
+
+Those filter ports are the negotiated RTP ports: 50010 is our own
+`m=audio 50010`, 39460 is BSNL's `m=audio 39460` from the answer. The network
+did everything right and delivered the bearer 36 ms late relative to a decision
+the modem had already taken 1 ms after sending the PRACK.
+
+`qipcall_qos_reservation_timer` reads `401f` — 8000 ms. The modem is configured
+to wait eight seconds for exactly this and waited one millisecond, because it
+never entered the precondition path at all: it never parsed the answer that
+would have told it preconditions were in play.
+
+## The answer's contents are provably irrelevant
+
+This is the earlier investigation's precondition experiment, which is worth
+re-reading now that the parse is known not to happen. All five media booleans
+were set to Jio's zeros, and the capture confirmed the change reached the wire —
+zero `a=curr`/`a=des`/`a=conf:qos` in either direction, our session-level `b=`
+block gone, and BSNL's answer stripped to its minimum:
+
+```
+v=0
+o=LucentPCSF 817657360 817657360 IN IP4 imsgroup-322-…3gppnetwork.org
+s=-
+c=IN IP4 61.2.220.148
+t=0 0
+m=audio 40584 RTP/AVP 97 96
+a=rtpmap:97 AMR/8000/1
+a=fmtp:97 mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1
+a=rtpmap:96 telephone-event/8000/1
+a=fmtp:96 0-15
+a=sendrecv
+```
+
+The call failed identically: `INVITE → 100 → 183 → PRACK → CANCEL`, cause 373,
+`SDP parse failed`. At the time this was read as eliminating preconditions, QoS
+and bandwidth as suspects. It does more than that. A minimal, unobjectionable
+answer — no preconditions, no bandwidth lines, no over-length fields beyond the
+`o=` FQDN — is not parsed either. **Nothing BSNL puts in the answer changes
+whether the answer is read.**
+
+Put beside the incoming capture, the statement is sharp: on this configuration
+the modem parses SDP in **requests** and never in **responses**, and it is the
+response case that reports `SDP parse failed`.
+
+The divergence is localised to a few instructions. Both paths run the same
+dialog bookkeeping and both end at `qipcalldialog.c:5258`
+(`update_peer_caps: Tags not present in Contact, so ignore`). On the incoming
+path `qimfif.cpp:8116` then fetches the Contact a second time and the parser
+runs. On the outgoing path — nothing, and the PRACK goes out. The two paths even
+call different `get_contact` sites: `qimfif.cpp:8116` incoming, `8136` outgoing.
+What happens after 5258 is QSR-hashed in both directions.
+
+## NV is exhausted, confirmed exhaustively
+
+The earlier investigation eliminated the NV space item by item, by hand.
+`scripts/qmi/nvsweep.sh` now does it mechanically: for all 62 `/nv/item_files/ims/*`
+items, it compares the live value against all eight carrier configs in the modem
+image and reports only disagreements. The result agrees with the hand analysis.
+
+Exactly three items match no config at all, and none is a candidate:
+
+| item | live | note |
+|---|---|---|
+| `qipcall_audio_codec_list` | 128 bytes of zeros | blanked by this investigation itself, not a baseline |
+| `qp_ims_ut_config` | `"jionet"` | Jio's XCAP domain, a retargeting leftover; supplementary services, not voice |
+| `qp_ims_vt_4G_media_capability` | — | video |
+
+One correction to the parent RCA's table: `qp_ims_media_config` is **not**
+Jio-specific. Compared over all 535 bytes rather than its first byte, the live
+value is byte-identical to `gcf` and `ntel`, and the leading `06` is shared by
+four of the eight configs. It was aligned correctly and is not an outlier.
+
+**The codec list is a real lever and it is not the fault.** Restoring Jio's
+`AMR_WB_OA;AMR_WB_BE;AMR_OA;AMR_BE` moves the offer from
+`ReSizing med_arr by num_formats = 4` to `num_formats = 6`, so the item plainly
+drives media construction. But `qipcallsdp_reallocate_med_arr:num_formats is 0!`
+and `Failed to reallocate med_arr!! Status = 1` fire **exactly eight times per
+capture either way** — that pair is a different `med_arr` and is background
+noise at every IMS bring-up, not a symptom. Tested without placing a single
+call, since the signal appears at registration.
+
 ## Both directions fail, but not in the same place
 
 Both directions fail, and for a long time that symmetry was read as evidence of
@@ -362,6 +456,12 @@ failed call. Low volume, and it carries the event but not the reason.
    present (`ActualMsgLen: 1486`) and `qimfif_cbs.cpp:1932`
    (`content length is 0`) fires for the bodiless `100 Trying` but not for the
    `183`, so the body is at least noticed. What happens to it next is hashed.
+   The one remaining untested difference between the two paths is the *message
+   type* carrying the SDP: every answer this device has ever received arrived in
+   a reliable provisional `183` with `RSeq`, never in a `200 OK`. Forcing the
+   answer into a `200 OK` would need 100rel disabled, and no NV item for that
+   has been identified — `qp_ims_sip_extended_0_config` (1024 bytes) is the
+   likeliest home for such a flag and is undecoded.
 3. **Diff against a working handset on the same SIM.** The same SIM works
    immediately in a Snapdragon 870 handset. A capture of *its* IMS exchange would
    show what BSNL sends when it works, and whether the difference is in what we
@@ -409,6 +509,10 @@ Written for this investigation, useful to any Qualcomm porter:
 | `scripts/qmi/f3probe.py` | enables F3 messaging and censuses what the modem actually emits |
 | `scripts/qmi/f3reg.sh` | the registration control: F3 across a forced deregistration/re-registration, no calls, no NV writes |
 | `scripts/qmi/f3in.sh` | F3 across incoming calls — the 27 ms INVITE-to-488 window, no plugin swap and no NV writes |
+| `scripts/qmi/imsnv.py` | reads the IMS NV items the modem actually consults — the list harvested from its own `qpIO.c:711` output, not guessed |
+| `scripts/qmi/nvsweep.sh` | compares every live `/nv/item_files/ims/*` value against all eight carrier configs and reports only the disagreements |
+| `scripts/qmi/mediacfg.sh` | byte-compares `qp_ims_media_config` across configs and against EFS |
+| `scripts/qmi/codeclist.sh` | the codec-list measurement: writes, captures a re-registration, restores generated values |
 
 The device-side cost of full-spectrum capture is what forces the design: 198
 KB/s with F3 and equip-1 logs, about 1 MB/s with all sixteen log masks during a
