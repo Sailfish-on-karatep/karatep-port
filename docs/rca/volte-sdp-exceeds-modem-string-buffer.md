@@ -1,14 +1,18 @@
-# VoLTE: BSNL's SDP carries fields longer than a 50-byte buffer in the modem
+# VoLTE: a 50-byte string truncation fires only while parsing BSNL's answer
 
-**Status:** root-caused, not fixable on this baseband.
+**Status:** narrowed to one reproducible signal; the offending string and the
+causal link to the abort are **not** established. An earlier revision of this
+document claimed both. See *What this does and does not establish*.
 
 VoLTE on karatep registers correctly, dials correctly, and dies during media
 negotiation. Outgoing calls end ~35 ms after BSNL's `183 Session Progress` with
 QMI end cause 373 (media class) and the text `SDP parse failed`. Incoming calls
 are refused with `488 Not Acceptable Here` 28 ms after the INVITE.
 
-The cause is a fixed-size string buffer in the modem's offer/answer API. BSNL's
-SDP contains two fields longer than it, in both directions.
+The one signal that distinguishes the failing window from everything else is a
+50-byte string truncation inside the modem, reported twice per call and only
+while BSNL's answer is being processed. Which string overflows, and whether the
+overflow is what kills the call, are both still open.
 
 Identifiers below are redacted: `4048001XXXXXXXX` is the private user identity,
 `+9194873XXXXX` the MSISDN, `+9194873YYYYY` the called party.
@@ -40,43 +44,80 @@ else. Every other call site in that file fires at INVITE-build time:
 | 1960 | `len of str printed len24` | INVITE build (×3) |
 | **2747** | **`len of str printed exceeded dst str len50`** | **answer parse only (×2 per call)** |
 
-Two truncation reports per call. BSNL's answer contains exactly two fields
-longer than 50 bytes:
+## What this does and does not establish
+
+**An earlier revision of this document claimed the truncated strings were the
+SDP `o=` origin FQDN (60 bytes) and the `a=fmtp:97` parameter value (62 bytes),
+on the grounds that BSNL's answer contains exactly two fields over 50 bytes and
+the message fires exactly twice. That was reasoning from a coincidence of
+counts, and the surrounding F3 context does not support it.**
+
+The messages bracketing each fire are dialog bookkeeping, not media parsing:
 
 ```
-o=LucentPCSF 330616592 330616592 IN IP4 imsgroup-322-0000002.tns01.ims.mnc080.mcc404.3gppnetwork.org
-a=fmtp:97 mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1
+qipcalldialog.c:5361  [incoming_msg] [call_id: ...] [dialog_id: ...]
+qipcalldialog.c:4670  [update_dialog_id] [TEMP_OUTGOING_DIALOG ?= TEMP_OUTGOING_DIALOG]
+qvp_app_oa_api.c:2747 len of str printed exceeded dst str len50      <---
+qipcalldialog.c:5331  [updating call_ptr with dialog_id: <call-id><local-tag><remote-tag>]
 ```
 
-| field | value | bytes |
-|---|---|---|
-| `o=` origin FQDN | `imsgroup-322-0000002.tns01.ims.mnc080.mcc404.3gppnetwork.org` | **60** |
-| `a=fmtp:97` value | `mode-set=0,2,4,7; mode-change-period=2; mode-change-neighbor=1` | **62** |
-| `a=rtpmap:97` value | `AMR/8000/1` | 10 |
-| `c=` value | `IN IP4 61.2.220.148` | 19 |
-| `a=fmtp:96` value | `0-15` | 4 |
+`qipcalldialog.c:5331` concatenates call-id, local tag and remote tag into one
+dialog identifier. With BSNL's tag values that is **92 bytes**:
 
-The modem truncates both, the SDP becomes unusable, and the call is torn down.
+| component | bytes |
+|---|---|
+| call-id | 34 |
+| local tag | 10 |
+| BSNL remote tag (`…-gm-po-lucentPCSF-…`) | 48 |
+| **concatenated dialog id** | **92** |
 
-Both fields are legal SDP. RFC 4566 explicitly permits an FQDN as the `o=`
-unicast-address, and places no length limit on an `fmtp` parameter list.
+`qvp_app_oa_api.c` is also not obviously an offer/answer module: its other call
+sites report destination sizes of 3000, 204, 44 and 24 bytes, which is the
+signature of a generic string-printing helper used throughout, not of SDP code.
+"OA" may not mean offer/answer at all.
+
+So there are at least three plausible over-length candidates at that moment —
+the dialog id (92), the `o=` FQDN (60), the `fmtp` value (62) — and the context
+points at the first, not the two this document originally named.
+
+**The causal link is also unproven.** Both truncations fire at 44.961 and
+44.970. The PRACK is built and sent at 44.982, and only then, at 44.983, does
+the modem begin building the CANCEL. A whole successful PRACK transaction sits
+between the truncation and the abort. And `qvp_app_oa_api.c:1117` reports the
+same kind of overflow against a 204-byte buffer at INVITE-build time and is
+harmless. Truncation here is suggestive, not established as fatal.
+
+### What is solid
+
+- Line 2747 fires **only** in the window where BSNL's answer is processed,
+  exactly twice per call, and nowhere else in 420 seconds.
+- Something in that exchange exceeds a 50-byte destination buffer in the modem.
+- The failure is symmetric: incoming calls are refused `488 Not Acceptable
+  Here`, which rules out everything specific to the answer path.
+- The abort decision itself is taken **after** the PRACK is sent, in the 1 ms
+  between 44.982 and 44.983, and nothing in the plain-text F3 stream in that gap
+  concerns media. Some messages in that window have unresolved filenames and
+  integer arguments that look like QSR hashes — those are the next thing to
+  decode.
 
 ## It fails symmetrically, which is what identifies it
 
 An incoming VoLTE call — the first ever tested on this port — is refused with
 `488 Not Acceptable Here` 28 ms after the INVITE. `488` is precisely "your SDP
-is not acceptable to me", and BSNL's *offer* carries the same two over-length
-fields:
+is not acceptable to me". BSNL's *offer* carries over-length fields of its own —
+the `o=` FQDN at 60 bytes and an `a=fmtp:96` value at 73 — and its tag values
+are the same shape as in the answer, so both the SDP and the dialog-string
+candidates are present in this direction too.
 
-| field | bytes |
-|---|---|
-| `o=` origin FQDN | 60 |
-| `a=fmtp:96` value (`…; max-red=0`) | 73 |
+That symmetry is the strongest single piece of evidence, and it is about *where*
+the fault is, not what it is. It rules out every hypothesis that lived in the
+answer-specific path — PRACK handling, precondition and UPDATE sequencing, the
+183 early-media flow — because the incoming rejection involves none of them.
 
-That symmetry is the strongest single piece of evidence. It rules out every
-hypothesis that lived in the answer-specific path — PRACK handling, precondition
-and UPDATE sequencing, the 183 early-media flow — because the incoming rejection
-involves none of them. The same buffer, in the same module, in both directions.
+**The incoming case is also the cleaner experiment, and it has not yet been run
+with F3 enabled.** INVITE to 488 is 28 ms with no PRACK, no preconditions and no
+CANCEL, so whatever refuses the SDP must log inside that window with far less
+noise around it. That is the next measurement worth taking.
 
 It also eliminated two suspects outright. The incoming offer contains **no**
 `telephone-event/8000/1` channel count and **no** duplicate `c=` line — two
@@ -169,34 +210,41 @@ failed call. Low volume, and it carries the event but not the reason.
   `telephone-event/16000` as intended. BSNL's answer was structurally identical
   either way (only the RTP port differs) and the call failed the same way.
 
-## Caveats
+## Next measurements
 
-Causation is inferred from exclusivity and an exact count match, not proven.
-Line 2747 fires only against BSNL's SDP, exactly as many times as there are
-over-length fields, immediately before teardown — but note that
-`qvp_app_oa_api.c:1117` reports a similar overflow against a 204-byte buffer at
-INVITE-build time and is **not** fatal. An "exceeded" message alone does not
-imply the call dies.
+In priority order, each of which can falsify something:
 
-Which of the two truncations is the fatal one is not established. The `o=`
-unicast-address is informational in RFC 4566 — media routing comes from `c=`,
-which is short — so it is plausible that only the `fmtp` truncation matters.
-That distinction decides whether any workaround exists at all (see below).
+1. **F3 during an incoming call.** 28 ms, no PRACK, no preconditions. The
+   cleanest window in which to see what refuses the SDP.
+2. **Resolve the QSR-hashed messages in the 1 ms before the CANCEL.** Some F3
+   records in that gap decode to garbage filenames with integer arguments that
+   look like hashes; `modem.b24` is the string table they resolve against.
+   `scripts/qmi/readmsgtable.py` is the existing starting point.
+3. **Does line 2747 fire outside calls?** BSNL's REGISTER `200 OK` carries tag
+   values of the same length. If the truncation happens during registration too
+   — which succeeds — it is bookkeeping noise and not the fault at all. This is
+   the cheapest test of the whole hypothesis and needs no call, only F3 enabled
+   across a re-registration.
 
-## Why this is not fixable here
+## Why a firmware fix is not available
 
-- **Both offending fields are BSNL's to choose.** The `o=` origin is their
-  Lucent P-CSCF's session identity; the `fmtp` is their AMR parameter set. We
-  send nothing that influences either.
 - **The buffer is a compile-time constant in signed modem firmware.** MSM8937
   PIL images are authenticated by TZ against a certificate chain rooted in OEM
   fuses; altering `modem.b*` invalidates the signed hash segment and the image
   will not load. Lenovo shipped no later baseband for this device, and another
   vendor's newer MSM8937 image will not authenticate against these fuses.
-- **Nothing on the host side reaches it.** This is why fourteen NV alignments,
-  five media booleans, a codec narrowing, a mode-set change and a full carrier
-  config swap all failed to move the symptom: none of them were ever in contact
-  with the defect.
+- **No host-side lever has ever touched it.** Fourteen NV alignments, five media
+  booleans, a codec narrowing, a mode-set change and a full carrier config swap
+  all failed to move the symptom.
+- **If the fault is in the SDP fields, there may still be a workaround**, since
+  BSNL's `a=fmtp` is an *answer to our offer*: their own incoming offer lists
+  `PCMA/8000`, which carries no `fmtp` at all. Forcing a G.711 offer via
+  `qipcall_audio_codec_list` would remove that field from their answer and leave
+  only the `o=` FQDN over-length — which, being informational in RFC 4566, may
+  be survivable. If the fault is in the dialog id instead, nothing we send
+  changes it. Note the codec-list token names are not plaintext anywhere in the
+  image, so which tokens the parser accepts beyond `AMR_OA`/`AMR_BE` is unknown
+  and would have to be found by trial.
 
 This is consistent with reports of the same symptom on shipping handsets on
 BSNL — calls dropping immediately, callers hearing "switched off", resolved by

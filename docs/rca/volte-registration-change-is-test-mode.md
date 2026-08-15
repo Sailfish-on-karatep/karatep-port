@@ -4382,11 +4382,13 @@ are placed on CS and work.
 # SUPERSEDED: the modem did disclose it, and this document's instrument was wrong
 
 The conclusion above — "for a reason it will not disclose" — is wrong, and so is
-the finding it rests on. The root cause is written up in
-[`volte-sdp-exceeds-modem-string-buffer.md`](volte-sdp-exceeds-modem-string-buffer.md):
-**BSNL's SDP carries two fields longer than a 50-byte string buffer in the
-modem's offer/answer API**, in both directions, and the modem reports the
-truncation itself.
+the finding it rests on. The modem discloses a great deal once asked; the
+investigation continues in
+[`volte-sdp-exceeds-modem-string-buffer.md`](volte-sdp-exceeds-modem-string-buffer.md),
+where the failing window is narrowed to a **50-byte string truncation that fires
+only while BSNL's answer is being processed**. Which string overflows, and
+whether it is what kills the call, are still open there — an interim revision of
+that document asserted both and has been corrected.
 
 Two retractions matter to anyone reading the pages above.
 
